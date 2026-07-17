@@ -49,4 +49,4 @@ else
   load_env_file "/app/kongodb.env" || true
 fi
 
-exec sh -c 'KONGODB_PORT=${PORT:-${KONGODB_PORT:-8080}} kongodb'
+exec sh -c 'KONGODB_PORT=${PORT:-${KONGODB_PORT:-8080}} kongo'

@@ -15,7 +15,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # 3. Application stage: Copy source and build
 COPY . . 
-RUN cargo build --release --bin kongodb
+RUN cargo build --release --bin kongo
 
 # Build the browser admin independently so frontend changes do not invalidate
 # the cached Rust dependency layer.
@@ -31,15 +31,15 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd -m -u 10001 kongodb \
+    && useradd -m -u 10001 kongo \
     && mkdir -p /data \
-    && chown -R kongodb:kongodb /data
+    && chown -R kongo:kongo /data
 
 WORKDIR /app
 
 # --- ASSET COPIES ---
 # Copy the binary
-COPY --from=builder /app/target/release/kongodb /usr/local/bin/kongodb
+COPY --from=builder /app/target/release/kongo /usr/local/bin/kongo
 # Copy the README specifically so the app can access it
 COPY --from=builder /app/DOCUMENTATION.md /app/DOCUMENTATION.md
 COPY --from=admin-ui-builder /app/admin-ui/dist /app/admin-ui/dist
@@ -54,7 +54,7 @@ ENV KONGODB_EXPORT_PATH=/data/exports
 ENV KONGODB_DOCS_FILE=/app/DOCUMENTATION.md
 VOLUME ["/data"]
 
-USER kongodb
+USER kongo
 EXPOSE 8080
 
 CMD ["/usr/local/bin/docker-entrypoint.sh"]
