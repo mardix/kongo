@@ -1,0 +1,9 @@
+/target
+/.smoke
+/backups
+/data_local
+.DS_Store
+kongodb.env.local
+/.history
+admin-ui/node_modules
+admin-ui/dist

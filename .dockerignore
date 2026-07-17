@@ -1,0 +1,11 @@
+target
+admin-ui/node_modules
+admin-ui/dist
+admin-ui/.vite
+.git
+.smoke
+backups
+data_local
+*.db
+*.log
+_trash/

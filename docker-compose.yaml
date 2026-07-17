@@ -1,0 +1,50 @@
+services:
+  kongo:
+    build:
+      context: https://github.com/mardix/kongo.git#main
+    restart: unless-stopped
+    image: kongo:local
+    container_name: kongo
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./kongodb.env
+    environment:
+      # Access key for API and Admin UI access. Change this to a secure value in production.
+      KONGODB_AUTH_MODE: access_key
+      KONGODB_ACCESS_KEY: ${KONGODB_ACCESS_KEY:-change-me}
+
+      # == Storage configuration
+      # DATA_DIR is the persistent volume mount point inside the container. It must be writable by the container.
+      KONGODB_DATA_DIR: /data
+
+      # Storage: local|s3 -- Local storage is the default and requires a persistent volume. S3 storage requires AWS credentials and an S3 bucket.
+      KONGODB_STORAGE_MODE: local
+
+      # S3 storage configuration (only needed if KONGODB_STORAGE_MODE=s3)
+      KONGODB_S3_BUCKET:
+      KONGODB_S3_ACCESS_KEY:
+      KONGODB_S3_SECRET_KEY:
+      KONGODB_S3_PREFIX: data/kongo/data
+      KONGODB_S3_REGION: us-east-1
+
+      # Runtime  behavior
+      # KONGODB_RUNTIME_PROFILE: memory|*balanced|throughput
+      KONGODB_RUNTIME_PROFILE: balanced
+
+      # Write behavio
+      # KONGODB_WRITE_MODE: committed|accepted
+      KONGODB_WRITE_MODE: committed
+
+      # BACKUP_PATH and EXPORT_PATH are used for manual and automatic backups. They can be local paths or S3 paths (s3://bucket/prefix). If using S3, ensure the bucket exists and the container has access to it.
+      KONGODB_BACKUP_PATH: /data/backups
+      KONGODB_EXPORT_PATH: /data/exports
+
+      # Only needed by separately hosted browser clients; the bundled UI is same-origin.
+      # KONGODB_CORS_ALLOWED_ORIGINS:* for any
+      KONGODB_CORS_ALLOWED_ORIGINS:
+    volumes:
+      - kongodb-data:/data
+
+volumes:
+  kongodb-data:
