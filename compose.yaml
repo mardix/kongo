@@ -7,8 +7,6 @@ services:
     container_name: kongo
     ports:
       - "8080:8080"
-    env_file:
-      - ./kongodb.env
     environment:
       # Access key for API and Admin UI access. Change this to a secure value in production.
       KONGODB_AUTH_MODE: access_key
