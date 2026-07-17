@@ -10,6 +10,7 @@ import { MetricsEventsPanel } from './MetricsEventsConsole.jsx';
 import { ResponsePanel } from './ResponsePanel.jsx';
 import { FullTextSearchPanel } from './FullTextSearchPanel.jsx';
 import { AuditLogsPanel } from './AuditLogsPanel.jsx';
+import { DocumentUiEditor } from './DocumentUiEditor.jsx';
 
 const operations = ['query', 'insert', 'update', 'delete', 'count', 'aggregate', 'search', 'custom'];
 const dbTabs = [
@@ -574,10 +575,15 @@ export function DbCrudConsole() {
   }
 
   function openCreateEntry() {
+    const availableNamespaces = new Set(activeNamespaces.map(namespaceLabel).filter(Boolean));
+    const namespace = availableNamespaces.has(settings.namespace) ? String(settings.namespace).trim() : '';
     setEntryModal({
       mode: 'create',
-      namespace: settings.namespace,
+      namespace,
+      defaultNamespace: namespace,
       dataText: pretty({ name: '', value: '' }),
+      editorMode: 'ui',
+      editorError: '',
       id: '',
       userId: datastoreQuery.userId || '',
       ttlSeconds: '',
@@ -588,7 +594,7 @@ export function DbCrudConsole() {
       purge: false,
       maxDocs: '',
       dryRun: false,
-      useCustomNamespace: false
+      useCustomNamespace: !namespace
     });
   }
 
@@ -598,6 +604,8 @@ export function DbCrudConsole() {
       mode: 'edit',
       namespace: namespaceFromRow(row) || settings.namespace,
       dataText: pretty(data),
+      editorMode: 'ui',
+      editorError: '',
       id: documentId(row),
       userId: documentUserId(row),
       ttlSeconds: '',
@@ -617,6 +625,8 @@ export function DbCrudConsole() {
       mode: 'view',
       namespace: namespaceFromRow(row) || settings.namespace,
       dataText: pretty(row),
+      editorMode: 'json',
+      editorError: '',
       id: documentId(row),
       userId: documentUserId(row),
       ttlSeconds: '',
@@ -636,6 +646,8 @@ export function DbCrudConsole() {
       mode: 'delete',
       namespace: namespaceFromRow(row) || settings.namespace,
       dataText: row ? pretty(row) : pretty({}),
+      editorMode: 'json',
+      editorError: '',
       id: row ? documentId(row) : '',
       userId: row ? documentUserId(row) : '',
       ttlSeconds: '',
@@ -657,8 +669,9 @@ export function DbCrudConsole() {
   async function submitEntryModal() {
     if (!entryModal) return;
     if (!activeDb) return showToast('Select a DB first', true);
-    const namespace = entryModal.namespace || settings.namespace;
-    if (!namespace) return showToast('Select a namespace first', true);
+    const namespace = String(entryModal.namespace || settings.namespace || '').trim();
+    if (!namespace) return showToast('Enter a namespace first', true);
+    if (entryModal.editorError) return showToast(entryModal.editorError, true);
 
     let request;
     if (entryModal.mode === 'create') {
@@ -723,6 +736,13 @@ export function DbCrudConsole() {
         setResponseDurationMs(durationMs);
         setLastOperation(request.operation);
         return data;
+      }
+      if (entryModal.mode === 'create') {
+        const addNamespace = (items) => items.some((item) => namespaceLabel(item) === namespace)
+          ? items
+          : [...items, { namespace, collection: namespace, name: namespace }];
+        setNamespaces(addNamespace);
+        setActiveNamespaces(addNamespace);
       }
       const nextPage = entryModal.mode === 'create' ? 1 : documentPage;
       await loadNamespacePage(namespace, nextPage, documentPageSize, { collapseRequest: true });
@@ -936,8 +956,13 @@ export function DbCrudConsole() {
 
                 {!namespaceTabs.length ? (
                   <section className="panel p-8 text-center">
-                    <h3 className="text-sm font-semibold text-slate-950">Select A Namespace</h3>
-                    <p className="mt-1 text-sm text-slate-500">Choose a namespace from the selector above to load its latest documents.</p>
+                    <h3 className="text-sm font-semibold text-slate-950">{activeNamespaces.length ? 'Select A Namespace' : 'Create Your First Entry'}</h3>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {activeNamespaces.length
+                        ? 'Choose a namespace from the selector above to load its latest documents.'
+                        : 'Add a document and enter its namespace to initialize this datastore.'}
+                    </p>
+                    <button type="button" onClick={openCreateEntry} className="btn-primary mt-4">Add Entry</button>
                   </section>
                 ) : lastOperation === 'query' ? (
                   <DocumentsPanel
@@ -1076,7 +1101,7 @@ export function DbCrudConsole() {
             showToast('Document id copied');
           }}
           onCopyJson={async () => {
-            await navigator.clipboard.writeText(pretty(rowDrawer));
+            await navigator.clipboard.writeText(pretty(normalizeDocumentForDisplay(rowDrawer)));
             showToast('Document JSON copied');
           }}
         />
@@ -1452,7 +1477,7 @@ function DocumentDbHomeToolbar({ namespaces, selected, onSelect, onAdd, onRefres
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={onRefresh} disabled={!selected} className="btn-secondary">Refresh</button>
-          <button type="button" onClick={onAdd} disabled={!selected} className="btn-primary">Add Entry</button>
+          <button type="button" onClick={onAdd} className="btn-primary">Add Entry</button>
         </div>
       </div>
     </section>
@@ -2499,65 +2524,107 @@ function SortHeader({ label, active, dir, onClick }) {
 }
 
 function EntryModal({ modal, onChange, onClose, onSubmit }) {
-  const title = modal.mode === 'create' ? 'Create entry' : modal.mode === 'edit' ? 'Edit entry' : modal.mode === 'delete' ? 'Delete entry' : 'View entry';
+  const title = modal.mode === 'create' ? 'Create Entry' : modal.mode === 'edit' ? 'Edit Entry' : modal.mode === 'delete' ? 'Delete Entry' : 'View Entry';
   const readonly = modal.mode === 'view' || modal.mode === 'delete';
   const namespaceReadOnly = modal.mode !== 'create' || !modal.useCustomNamespace;
+  const canSwitchEditor = modal.mode === 'create' || modal.mode === 'edit';
+  const editorMode = canSwitchEditor ? (modal.editorMode || 'json') : 'json';
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="max-h-[92vh] w-full max-w-4xl overflow-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+      <div className="max-h-[94vh] w-full max-w-6xl overflow-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
+        <div className="sticky top-0 z-30 flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 bg-white px-5 py-4">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">{title}</h3>
-            <p className="mt-1 text-sm text-slate-600">Metadata fields stay outside the JSON body.</p>
+            <p className="mt-1 text-sm text-slate-600">Configure record metadata, then build the document visually or edit its JSON directly.</p>
           </div>
           <button onClick={onClose} className="btn-secondary">Close</button>
         </div>
 
-        <div className="grid gap-4 px-5 py-5 lg:grid-cols-3">
-          <Field label="Namespace" value={modal.namespace || ''} onChange={(v) => onChange({ namespace: v })} placeholder="namespace" readOnly={namespaceReadOnly} />
-          {modal.mode === 'create' ? <CheckboxField label="Use different namespace" checked={modal.useCustomNamespace} onChange={(v) => onChange({ useCustomNamespace: v })} /> : null}
-          {modal.mode === 'delete' || modal.mode === 'edit' || modal.mode === 'view' ? <Field label="ID" value={modal.id || ''} onChange={(v) => onChange({ id: v })} placeholder="document id" readOnly={modal.mode !== 'delete'} /> : null}
-          <div></div>
-          {modal.mode !== 'delete' ? (<Field label="_user_id" value={modal.userId || ''} onChange={(v) => onChange({ userId: v })} placeholder="optional identity user id" readOnly={modal.mode === 'view'} />) : null}
-          {modal.mode === 'create' ? <Field label="TTL seconds" value={modal.ttlSeconds} onChange={(v) => onChange({ ttlSeconds: v })} placeholder="optional" /> : null}
-          {modal.mode === 'create' ? (
-            <label className="block">
-              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Expiry behavior</span>
-              <select value={modal.expiryBehavior} onChange={(e) => onChange({ expiryBehavior: e.target.value })} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20">
-                <option value="archive">archive</option>
-                <option value="delete">delete</option>
-              </select>
-            </label>
-          ) : null}
-          {modal.mode === 'create' ? <Field label="Unique fields" value={modal.uniqueFields} onChange={(v) => onChange({ uniqueFields: v })} placeholder="email, profile.account_id" /> : null}
-          {modal.mode === 'create' ? (
-            <label className="block">
-              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">On conflict</span>
-              <select value={modal.onConflict} onChange={(e) => onChange({ onConflict: e.target.value })} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20">
-                <option value="">default</option>
-                <option value="skip">skip</option>
-                <option value="error">error</option>
-              </select>
-            </label>
-          ) : null}
-          {modal.mode === 'edit' ? <Field label="Max docs" value={modal.maxDocs} onChange={(v) => onChange({ maxDocs: v })} placeholder="1" /> : null}
-          {modal.mode === 'delete' ? <Field label="TTL seconds" value={modal.ttlSeconds} onChange={(v) => onChange({ ttlSeconds: v })} placeholder="archive ttl" /> : null}
-          {modal.mode === 'delete' ? <Field label="Max docs" value={modal.maxDocs} onChange={(v) => onChange({ maxDocs: v })} placeholder="1" /> : null}
-          {modal.mode === 'edit' ? <CheckboxField label="Replace document" checked={modal.replace} onChange={(v) => onChange({ replace: v })} /> : null}
-          {modal.mode === 'delete' ? <CheckboxField label="Purge hard delete" checked={modal.purge} onChange={(v) => onChange({ purge: v })} /> : null}
-          {modal.mode !== 'view' ? <CheckboxField label="Dry run" checked={modal.dryRun} onChange={(v) => onChange({ dryRun: v })} /> : null}
-        </div>
+        <section className="border-b border-slate-200 bg-slate-50 px-5 py-4">
+          <div className="mb-3">
+            <h4 className="text-sm font-semibold text-slate-900">Entry Settings</h4>
+            <p className="mt-0.5 text-xs text-slate-500">These options control where and how the document is stored. They are not written into the JSON body.</p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <Field label="Namespace" value={modal.namespace || ''} onChange={(v) => onChange({ namespace: v })} placeholder="users, products, events..." readOnly={namespaceReadOnly} />
+            {modal.mode === 'create' && modal.defaultNamespace ? (
+              <CheckboxField
+                label="Use Different Namespace"
+                checked={modal.useCustomNamespace}
+                onChange={(v) => onChange({
+                  useCustomNamespace: v,
+                  namespace: v ? modal.namespace : modal.defaultNamespace
+                })}
+              />
+            ) : null}
+            {modal.mode === 'delete' || modal.mode === 'edit' || modal.mode === 'view' ? <Field label="ID" value={modal.id || ''} onChange={(v) => onChange({ id: v })} placeholder="document id" readOnly={modal.mode !== 'delete'} /> : null}
+            {modal.mode !== 'delete' ? (<Field label="_user_id" value={modal.userId || ''} onChange={(v) => onChange({ userId: v })} placeholder="optional identity user id" readOnly={modal.mode === 'view'} />) : null}
+            {modal.mode === 'create' ? <Field label="TTL Seconds" value={modal.ttlSeconds} onChange={(v) => onChange({ ttlSeconds: v })} placeholder="optional" /> : null}
+            {modal.mode === 'create' ? (
+              <label className="block">
+                <span className="field-label">Expiry Behavior</span>
+                <select value={modal.expiryBehavior} onChange={(e) => onChange({ expiryBehavior: e.target.value })} className="field-input">
+                  <option value="archive">Archive</option>
+                  <option value="delete">Delete</option>
+                </select>
+              </label>
+            ) : null}
+            {modal.mode === 'create' ? <Field label="Unique Fields" value={modal.uniqueFields} onChange={(v) => onChange({ uniqueFields: v })} placeholder="email, profile.account_id" /> : null}
+            {modal.mode === 'create' ? (
+              <label className="block">
+                <span className="field-label">On Conflict</span>
+                <select value={modal.onConflict} onChange={(e) => onChange({ onConflict: e.target.value })} className="field-input">
+                  <option value="">Default</option>
+                  <option value="skip">Skip</option>
+                  <option value="error">Error</option>
+                </select>
+              </label>
+            ) : null}
+            {modal.mode === 'edit' ? <Field label="Max Docs" value={modal.maxDocs} onChange={(v) => onChange({ maxDocs: v })} placeholder="1" /> : null}
+            {modal.mode === 'delete' ? <Field label="TTL Seconds" value={modal.ttlSeconds} onChange={(v) => onChange({ ttlSeconds: v })} placeholder="archive ttl" /> : null}
+            {modal.mode === 'delete' ? <Field label="Max Docs" value={modal.maxDocs} onChange={(v) => onChange({ maxDocs: v })} placeholder="1" /> : null}
+            {modal.mode === 'edit' ? <CheckboxField label="Replace Document" checked={modal.replace} onChange={(v) => onChange({ replace: v })} /> : null}
+            {modal.mode === 'delete' ? <CheckboxField label="Purge Hard Delete" checked={modal.purge} onChange={(v) => onChange({ purge: v })} /> : null}
+            {modal.mode !== 'view' ? <CheckboxField label="Dry Run" checked={modal.dryRun} onChange={(v) => onChange({ dryRun: v })} /> : null}
+          </div>
+        </section>
 
         {modal.mode !== 'delete' ? (
           <div className="border-t border-slate-200 px-5 py-5">
-            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">JSON data</div>
-            <JsonEditor value={modal.dataText} onChange={(v) => onChange({ dataText: v })} minHeight="300px" readOnly={readonly} />
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Document Data</div>
+                {canSwitchEditor ? <p className="mt-1 text-xs text-slate-500">Use fields for guided editing or JSON for full control over nested data.</p> : null}
+              </div>
+              {canSwitchEditor ? (
+                <div className="flex gap-1 rounded-lg bg-slate-100 p-1" aria-label="Document editor mode">
+                  <button type="button" onClick={() => onChange({ editorMode: 'ui', editorError: '' })} className={`btn-tab ${editorMode === 'ui' ? 'btn-tab-active' : 'btn-tab-idle'}`}>UI Mode</button>
+                  <button type="button" onClick={() => onChange({ editorMode: 'json', editorError: '' })} className={`btn-tab ${editorMode === 'json' ? 'btn-tab-active' : 'btn-tab-idle'}`}>JSON Mode</button>
+                </div>
+              ) : null}
+            </div>
+            {editorMode === 'ui' ? (
+              <DocumentUiEditor
+                key={`${modal.mode}:${modal.id || 'new'}:${modal.namespace || ''}`}
+                value={modal.dataText}
+                onChange={(v) => onChange({ dataText: v })}
+                onError={(editorError) => onChange({ editorError })}
+                lockedKeys={modal.mode === 'edit' ? ['_id'] : []}
+              />
+            ) : (
+              <JsonEditor value={modal.dataText} onChange={(v) => onChange({ dataText: v, editorError: '' })} minHeight="300px" readOnly={readonly} />
+            )}
           </div>
         ) : null}
 
-        <div className="flex flex-wrap justify-end gap-2 border-t border-slate-200 px-5 py-4">
+        <div className="sticky bottom-0 z-30 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-white px-5 py-4">
+          <div className={`text-xs ${modal.editorError ? 'font-semibold text-rose-700' : 'text-slate-500'}`}>
+            {modal.editorError || (modal.mode === 'delete' ? 'Review the deletion options before continuing.' : 'Changes are validated before submission.')}
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
           <button onClick={onClose} className="btn-secondary">Cancel</button>
-          {modal.mode !== 'view' ? <button onClick={onSubmit} className={modal.mode === 'delete' ? 'btn-danger' : 'btn-primary'}>{modal.mode === 'delete' ? 'Delete entry' : 'Submit'}</button> : null}
+          {modal.mode !== 'view' ? <button onClick={onSubmit} className={modal.mode === 'delete' ? 'btn-danger' : 'btn-primary'}>{modal.mode === 'delete' ? 'Delete Entry' : 'Submit'}</button> : null}
+          </div>
         </div>
       </div>
     </div>
@@ -2565,23 +2632,32 @@ function EntryModal({ modal, onChange, onClose, onSubmit }) {
 }
 
 function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson }) {
+  const [viewMode, setViewMode] = useState('ui');
   const id = documentId(row);
   const namespace = namespaceFromRow(row);
   const userId = documentUserId(row);
+  const document = normalizeDocumentForDisplay(row);
+  const documentText = pretty(document);
   return (
-    <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col border-l border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-5xl flex-col border-l border-slate-200 bg-white shadow-2xl">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
         <div className="min-w-0">
-          <h3 className="text-lg font-semibold text-slate-950">Document details</h3>
+          <h3 className="text-lg font-semibold text-slate-950">Document Details</h3>
           <p className="mt-1 truncate font-mono text-xs text-slate-500">{namespace ? `${namespace} · ` : ''}{id || 'no _id'}</p>
         </div>
         <button onClick={onClose} className="btn-secondary">Close</button>
       </div>
-      <div className="flex flex-wrap gap-2 border-b border-slate-200 px-5 py-3">
-        <button onClick={onEdit} className="btn-primary">Edit</button>
-        <button onClick={onDelete} className="btn-danger">Delete</button>
-        <button onClick={onCopyId} disabled={!id} className="btn-secondary disabled:cursor-not-allowed disabled:opacity-50">Copy _id</button>
-        <button onClick={onCopyJson} className="btn-secondary">Copy JSON</button>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onEdit} className="btn-primary">Edit</button>
+          <button onClick={onDelete} className="btn-danger">Delete</button>
+          <button onClick={onCopyId} disabled={!id} className="btn-secondary disabled:cursor-not-allowed disabled:opacity-50">Copy _id</button>
+          <button onClick={onCopyJson} className="btn-secondary">Copy JSON</button>
+        </div>
+        <div className="flex gap-1 rounded-lg bg-slate-100 p-1" aria-label="Document detail view">
+          <button type="button" onClick={() => setViewMode('ui')} className={`btn-tab ${viewMode === 'ui' ? 'btn-tab-active' : 'btn-tab-idle'}`}>UI View</button>
+          <button type="button" onClick={() => setViewMode('json')} className={`btn-tab ${viewMode === 'json' ? 'btn-tab-active' : 'btn-tab-idle'}`}>JSON View</button>
+        </div>
       </div>
       <div className="grid gap-2 border-b border-slate-200 bg-slate-50 px-5 py-3 text-xs md:grid-cols-3">
         <ContextPill label="_id" value={id || 'n/a'} mono />
@@ -2589,7 +2665,11 @@ function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson }) {
         <ContextPill label="Namespace" value={namespace || 'n/a'} mono />
       </div>
       <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-5">
-        <pre className="rounded-xl bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100">{pretty(row || {})}</pre>
+        {viewMode === 'ui' ? (
+          <DocumentUiEditor key={`detail:${id || 'document'}`} value={documentText} readOnly />
+        ) : (
+          <JsonEditor value={documentText} onChange={() => {}} minHeight="520px" readOnly />
+        )}
       </div>
     </div>
   );
@@ -5170,6 +5250,7 @@ function normalizeDocumentForDisplay(row) {
   if (id && !out._id) out._id = id;
   if (userId && !out._user_id) out._user_id = userId;
   if (namespace && !out._namespace) out._namespace = namespace;
+  delete out._key;
   return out;
 }
 
