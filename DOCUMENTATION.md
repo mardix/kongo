@@ -2629,13 +2629,16 @@ Profile defaults:
 
 | Config Name | Default | Description |
 |---|---:|---|
+| `KONGODB_S3_TOPOLOGY` | `single` | `single` disables periodic remote polling for one active instance; `multi` enables cross-instance manifest polling. Writer leases remain active in both modes. |
 | `KONGODB_REPLICATION_MODE` | `async` | `sync` waits for remote persistence; `async` flushes through the background replication worker. |
 | `KONGODB_PRELOAD_DBS` | empty | Comma-separated S3-mode DB paths loaded at startup. |
-| `KONGODB_SNAPSHOT_EVERY_WRITES` | `100` | Versioned snapshot cadence per DB write count. |
-| `KONGODB_SNAPSHOT_RETENTION_DAYS` | `14` | Versioned snapshot age retention. `current.db` is not rotated. |
-| `KONGODB_REMOTE_SYNC_INTERVAL_SECS` | `3` | Cross-instance remote snapshot polling interval; `0` disables polling. |
+| `KONGODB_SNAPSHOT_EVERY_WRITES` | `100` | Target versioned snapshot cadence. Recovery currently keeps a safe checkpoint per replicated batch because replication segments are operation metadata rather than replayable database deltas. |
+| `KONGODB_SNAPSHOT_RETENTION_DAYS` | `14` | Versioned snapshot age retention. The manifest points directly to the current versioned snapshot; no duplicate `current.db` is written. |
+| `KONGODB_REMOTE_SYNC_INTERVAL_SECS` | `10` | Cross-instance manifest polling interval in `multi` topology. Ignored in `single`; `0` disables polling. |
 
 Writer leases, WAL segment size, flush cadence, safe hydrate, integrity checks, snapshot count cap, and temporary-artifact cleanup use fixed safe defaults.
+
+In S3 mode, `manifest.current_snapshot_key` is authoritative. Snapshot bytes are uploaded once to `snapshots/<snapshot_id>.db`; hydration, verification, and restore resolve the object through the manifest. `single` topology is recommended when only one Kongo process serves the S3 prefix because it avoids continuous manifest GET requests.
 
 ### Reads, Writes, and Responses
 

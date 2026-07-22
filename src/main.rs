@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use crate::api::router::build_router;
 use crate::config::{
-    BackupMode, JsonStorageFormat, KongodbConfig, ReplicationMode, StorageMode, WriteAckMode,
+    BackupMode, JsonStorageFormat, KongodbConfig, ReplicationMode, S3Topology, StorageMode,
+    WriteAckMode,
 };
 use crate::state::AppState;
 use crate::storage::manager::MultiDbManager;
@@ -25,6 +26,16 @@ use crate::storage::system_catalog::SystemCatalog;
 
 #[tokio::main]
 async fn main() {
+    if let Ok(raw) = std::env::var("KONGODB_S3_TOPOLOGY") {
+        let normalized = raw.trim().to_ascii_lowercase();
+        if normalized != "single" && normalized != "multi" {
+            eprintln!(
+                "startup error: KONGODB_S3_TOPOLOGY must be single|multi, got: {}",
+                raw.trim()
+            );
+            std::process::exit(2);
+        }
+    }
     let cfg = KongodbConfig::from_env();
     let runtime_access_key = match cfg.auth.mode.as_str() {
         "access_key" => match cfg.auth.access_key.clone() {
@@ -145,13 +156,30 @@ async fn main() {
         .as_ref()
         .map(|s| s.remote_sync_enabled)
         .unwrap_or(false);
+    let s3_topology = cfg
+        .storage
+        .s3
+        .as_ref()
+        .map(|s| s.topology.clone())
+        .unwrap_or(S3Topology::Single);
     let remote_sync_interval_secs = cfg
         .storage
         .s3
         .as_ref()
         .map(|s| s.remote_sync_interval_secs.max(1))
-        .unwrap_or(3);
+        .unwrap_or(10);
     let sync_concurrency = cfg.runtime.sync_concurrency.max(1);
+    if matches!(mode, StorageMode::S3) {
+        eprintln!(
+            "s3 topology={} remote_sync={} interval_secs={}",
+            match s3_topology {
+                S3Topology::Single => "single",
+                S3Topology::Multi => "multi",
+            },
+            remote_sync_enabled,
+            remote_sync_interval_secs
+        );
+    }
     let backup_target = if matches!(cfg.backup.mode, BackupMode::S3) {
         let raw = backup_cfg
             .s3_path

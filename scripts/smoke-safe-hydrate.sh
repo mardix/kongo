@@ -86,6 +86,7 @@ aws_s3api_hot() {
 }
 
 need_cmd curl
+need_cmd python3
 mkdir -p "$SMOKE_ROOT"
 if ! command -v aws >/dev/null 2>&1; then
   echo "smoke-safe-hydrate skipped: aws CLI not installed" | tee -a "$LOG_FILE"
@@ -133,10 +134,35 @@ if grep -Fq '"status":"error"' <<<"$SYNC"; then
 fi
 assert_contains "$SYNC" '"status":"success"' "sync_db should succeed"
 
-echo "[4/7] corrupt remote current snapshot object" | tee -a "$LOG_FILE"
+echo "[4/7] corrupt manifest-selected snapshot object" | tee -a "$LOG_FILE"
 CORRUPT_FILE="${SMOKE_ROOT}/corrupt-current.db"
+MANIFEST_FILE="${SMOKE_ROOT}/manifest.json"
+ORIGINAL_SNAPSHOT_FILE="${SMOKE_ROOT}/original-current.db"
 printf 'not-a-sqlite-database' > "$CORRUPT_FILE"
-HOT_KEY="${HOT_PREFIX%/}/${DB}/snapshots/current.db"
+MANIFEST_KEY="${HOT_PREFIX%/}/${DB}/manifest.json"
+aws_s3api_hot "$HOT_BUCKET" "$HOT_REGION" "$HOT_ENDPOINT" "$HOT_ACCESS_KEY" "$HOT_SECRET_KEY" "$HOT_SESSION_TOKEN" \
+  get-object \
+  --bucket "$HOT_BUCKET" \
+  --key "$MANIFEST_KEY" \
+  "$MANIFEST_FILE" >/dev/null
+HOT_KEY="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["current_snapshot_key"])' "$MANIFEST_FILE")"
+aws_s3api_hot "$HOT_BUCKET" "$HOT_REGION" "$HOT_ENDPOINT" "$HOT_ACCESS_KEY" "$HOT_SECRET_KEY" "$HOT_SESSION_TOKEN" \
+  get-object \
+  --bucket "$HOT_BUCKET" \
+  --key "$HOT_KEY" \
+  "$ORIGINAL_SNAPSHOT_FILE" >/dev/null
+
+restore_snapshot_object() {
+  if [[ -s "$ORIGINAL_SNAPSHOT_FILE" ]]; then
+    aws_s3api_hot "$HOT_BUCKET" "$HOT_REGION" "$HOT_ENDPOINT" "$HOT_ACCESS_KEY" "$HOT_SECRET_KEY" "$HOT_SESSION_TOKEN" \
+      put-object \
+      --bucket "$HOT_BUCKET" \
+      --key "$HOT_KEY" \
+      --body "$ORIGINAL_SNAPSHOT_FILE" >/dev/null || true
+  fi
+}
+trap restore_snapshot_object EXIT
+
 aws_s3api_hot "$HOT_BUCKET" "$HOT_REGION" "$HOT_ENDPOINT" "$HOT_ACCESS_KEY" "$HOT_SECRET_KEY" "$HOT_SESSION_TOKEN" \
   put-object \
   --bucket "$HOT_BUCKET" \

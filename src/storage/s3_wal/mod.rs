@@ -21,7 +21,7 @@ use crate::storage::auto_index::{AutoIndexDbReport, run_auto_index_for_conn};
 use crate::storage::backup::AutoBackupCycleReport;
 use crate::storage::db_path::resolve_db_file;
 use crate::storage::reaper::{ReaperStats, reap_conn};
-use crate::storage::s3_wal::snapshot::SnapshotMeta;
+use crate::storage::s3_wal::{manifest::Manifest, snapshot::SnapshotMeta};
 use crate::storage::schema::init_schema_with_retry;
 use object_store::{AwsS3ObjectStore, ObjectStore, as_arc, split_s3_uri};
 use replicator::Replicator;
@@ -264,10 +264,6 @@ impl S3WalEngine {
             return Ok(true);
         }
 
-        let key = snapshot_key(&self.cfg.prefix, &cache_key);
-        if self.replicator.blob_exists(&key).await? {
-            return Ok(true);
-        }
         let manifest = manifest_key(&self.cfg.prefix, &cache_key);
         if self.replicator.blob_exists(&manifest).await? {
             return Ok(true);
@@ -288,10 +284,6 @@ impl S3WalEngine {
 
     pub async fn db_exists_remote_only(&self, db_path: &str) -> AppResult<bool> {
         let (cache_key, _) = resolve_db_file(self.base_path.as_str(), db_path)?;
-        let key = snapshot_key(&self.cfg.prefix, &cache_key);
-        if self.replicator.blob_exists(&key).await? {
-            return Ok(true);
-        }
         let manifest = manifest_key(&self.cfg.prefix, &cache_key);
         if self.replicator.blob_exists(&manifest).await? {
             return Ok(true);
@@ -334,6 +326,8 @@ impl S3WalEngine {
             .entry(cache_key.to_string())
             .and_modify(|v| *v += record_count)
             .or_insert(record_count);
+        // Replication records currently describe completed operations rather than replayable SQL.
+        // Keep a recoverable checkpoint for every replicated batch until delta replay exists.
         if snapshot_after {
             if let Some(conn) = self.conns.get(cache_key).map(|c| c.clone()) {
                 self.force_sync_snapshot(&conn, cache_key).await?;
@@ -1067,6 +1061,9 @@ impl S3WalEngine {
         &self,
         max_concurrency: usize,
     ) -> AppResult<RemoteSyncReport> {
+        if !self.cfg.remote_sync_enabled {
+            return Ok(RemoteSyncReport::default());
+        }
         let dbs = self.loaded_db_paths();
         let mut report = RemoteSyncReport {
             checked: dbs.len(),
@@ -1489,15 +1486,17 @@ impl S3WalEngine {
         local_file: &std::path::Path,
         snapshot_id: Option<&str>,
     ) -> AppResult<()> {
-        let requested_key = if let Some(id) = snapshot_id {
-            Some(versioned_snapshot_key(&self.cfg.prefix, db_path, id))
-        } else {
-            None
+        let Some(manifest) = self.replicator.read_manifest(db_path).await? else {
+            return Ok(());
         };
-        let hot_key = requested_key
-            .clone()
-            .unwrap_or_else(|| snapshot_key(&self.cfg.prefix, db_path));
-        if let Some(bytes) = self.replicator.get_blob(&hot_key).await? {
+        let (resolved_snapshot_id, object_key) = resolve_manifest_snapshot(&manifest, snapshot_id)
+            .ok_or_else(|| {
+                let selector = snapshot_id.unwrap_or("current");
+                AppError::NotFound(format!(
+                    "snapshot not found in manifest for db {db_path}: {selector}"
+                ))
+            })?;
+        if let Some(bytes) = self.replicator.get_blob(&object_key).await? {
             if let Some(parent) = local_file.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     AppError::Internal(format!("failed to create local hydrate dir: {e}"))
@@ -1506,24 +1505,13 @@ impl S3WalEngine {
             tokio::fs::write(local_file, bytes).await.map_err(|e| {
                 AppError::Internal(format!("failed writing hydrated remote db: {e}"))
             })?;
+            self.loaded_snapshot_ids
+                .insert(db_path.to_string(), resolved_snapshot_id);
             return Ok(());
         }
-
-        if let Some(id) = snapshot_id {
-            return Err(AppError::NotFound(format!(
-                "snapshot_id not found for hydrate: {id}"
-            )));
-        }
-
-        let manifest = manifest_key(&self.cfg.prefix, db_path);
-        let manifest_exists = self.replicator.blob_exists(&manifest).await?;
-        if manifest_exists {
-            return Err(AppError::NotFound(format!(
-                "db_path found remotely but snapshot is missing for hydrate: {db_path}"
-            )));
-        }
-
-        Ok(())
+        Err(AppError::NotFound(format!(
+            "snapshot object missing for db {db_path}: {object_key}"
+        )))
     }
 
     async fn force_sync_snapshot(&self, conn: &Connection, db_path: &str) -> AppResult<()> {
@@ -1569,10 +1557,8 @@ impl S3WalEngine {
             .unwrap_or(0);
         let snapshot_id = format!("{}-{:020}", unix_now_secs(), applied_seq);
         let versioned_key = versioned_snapshot_key(&self.cfg.prefix, db_path, &snapshot_id);
-        let current_key = snapshot_key(&self.cfg.prefix, db_path);
         let checksum = sha256_hex(&bytes);
         target.put_blob(&versioned_key, &bytes).await?;
-        target.put_blob(&current_key, &bytes).await?;
         let snapshot_meta = SnapshotMeta {
             id: snapshot_id,
             tenant: db_path.to_string(),
@@ -1597,10 +1583,17 @@ impl S3WalEngine {
     }
 
     async fn tier_status(&self, db_path: &str, repl: &Replicator) -> AppResult<TierSyncStatus> {
-        let snapshot_key = snapshot_key(&self.cfg.prefix, db_path);
         let manifest = repl.read_manifest(db_path).await?;
         let manifest_exists = manifest.is_some();
-        let snapshot_exists = repl.blob_exists(&snapshot_key).await?;
+        let snapshot_exists = if let Some(manifest) = manifest.as_ref() {
+            if let Some((_, key)) = resolve_manifest_snapshot(manifest, None) {
+                repl.blob_exists(&key).await?
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         Ok(TierSyncStatus {
             manifest_exists,
             snapshot_exists,
@@ -1615,7 +1608,6 @@ impl S3WalEngine {
     }
 
     async fn verify_tier(&self, db_path: &str, repl: &Replicator) -> AppResult<VerifyTierResult> {
-        let snapshot_key = snapshot_key(&self.cfg.prefix, db_path);
         let Some(manifest) = repl.read_manifest(db_path).await? else {
             return Ok(VerifyTierResult {
                 ok: false,
@@ -1625,7 +1617,11 @@ impl S3WalEngine {
                 missing_segment_keys: vec![],
             });
         };
-        let snapshot_exists = repl.blob_exists(&snapshot_key).await?;
+        let snapshot_exists = if let Some((_, key)) = resolve_manifest_snapshot(&manifest, None) {
+            repl.blob_exists(&key).await?
+        } else {
+            false
+        };
         let mut missing_segment_keys = Vec::new();
         for seg in &manifest.segments {
             if !repl.blob_exists(&seg.object_key).await? {
@@ -1731,12 +1727,36 @@ fn sql_quote_path(path: &std::path::Path) -> AppResult<String> {
     Ok(raw.replace('\'', "''"))
 }
 
-fn snapshot_key(prefix: &str, db_path: &str) -> String {
-    format!("{}/{}/snapshots/current.db", prefix, db_path)
-}
-
 fn versioned_snapshot_key(prefix: &str, db_path: &str, snapshot_id: &str) -> String {
     format!("{}/{}/snapshots/{}.db", prefix, db_path, snapshot_id)
+}
+
+fn resolve_manifest_snapshot(
+    manifest: &Manifest,
+    requested_id: Option<&str>,
+) -> Option<(String, String)> {
+    if let Some(id) = requested_id {
+        if let Some(snapshot) = manifest.snapshots.iter().find(|snapshot| snapshot.id == id) {
+            return Some((snapshot.id.clone(), snapshot.object_key.clone()));
+        }
+        if manifest.current_snapshot_id.as_deref() == Some(id) {
+            return manifest
+                .current_snapshot_key
+                .as_ref()
+                .map(|key| (id.to_string(), key.clone()));
+        }
+        return None;
+    }
+
+    let current_id = manifest.current_snapshot_id.as_ref()?;
+    if let Some(key) = manifest.current_snapshot_key.as_ref() {
+        return Some((current_id.clone(), key.clone()));
+    }
+    manifest
+        .snapshots
+        .iter()
+        .find(|snapshot| &snapshot.id == current_id)
+        .map(|snapshot| (snapshot.id.clone(), snapshot.object_key.clone()))
 }
 
 fn manifest_key(prefix: &str, db_path: &str) -> String {
@@ -2021,4 +2041,64 @@ async fn dump_db_to_temp_bytes(
         .map_err(|e| AppError::Internal(format!("failed to read temp backup file: {e}")))?;
     remove_if_exists(&temp_file).await?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_manifest_snapshot;
+    use crate::storage::s3_wal::{manifest::Manifest, snapshot::SnapshotMeta};
+
+    fn manifest() -> Manifest {
+        let snapshot = SnapshotMeta {
+            id: "snap-2".to_string(),
+            tenant: "app/main".to_string(),
+            object_key: "data/app/main/snapshots/snap-2.db".to_string(),
+            checksum: "checksum".to_string(),
+            size_bytes: 42,
+            created_at: "2".to_string(),
+            from_seq: 0,
+            to_seq: 2,
+        };
+        Manifest {
+            tenant: "app/main".to_string(),
+            epoch: 1,
+            writer_id: "writer-test".to_string(),
+            applied_seq: 2,
+            current_snapshot_id: Some(snapshot.id.clone()),
+            current_snapshot_key: Some(snapshot.object_key.clone()),
+            snapshots: vec![snapshot],
+            segments: vec![],
+            compaction_watermark: None,
+            updated_at: "2".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolves_current_snapshot_from_manifest_pointer() {
+        let resolved = resolve_manifest_snapshot(&manifest(), None);
+        assert_eq!(
+            resolved,
+            Some((
+                "snap-2".to_string(),
+                "data/app/main/snapshots/snap-2.db".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn resolves_requested_versioned_snapshot() {
+        let resolved = resolve_manifest_snapshot(&manifest(), Some("snap-2"));
+        assert_eq!(
+            resolved.as_ref().map(|value| value.0.as_str()),
+            Some("snap-2")
+        );
+    }
+
+    #[test]
+    fn rejects_snapshot_missing_from_manifest() {
+        assert_eq!(
+            resolve_manifest_snapshot(&manifest(), Some("missing")),
+            None
+        );
+    }
 }

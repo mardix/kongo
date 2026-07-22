@@ -74,11 +74,19 @@ pub struct S3Config {
     pub snapshot_every_writes: u64,
     pub snapshot_max_count: usize,
     pub snapshot_max_age_days: u64,
+    pub topology: S3Topology,
     pub remote_sync_enabled: bool,
     pub remote_sync_interval_secs: u64,
     pub replication_mode: ReplicationMode,
     pub safe_hydrate: bool,
     pub safe_hydrate_quick_check: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum S3Topology {
+    Single,
+    Multi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,7 +264,18 @@ impl KongodbConfig {
             .max(1);
         let cache_ttl_secs = env_u64("KONGODB_CACHE_TTL_SECS").unwrap_or(15);
         let metric_cache_ttl_secs = env_u64("KONGODB_METRIC_EVENTS_CACHE_TTL_SECS").unwrap_or(30);
-        let remote_sync_interval_secs = env_u64("KONGODB_REMOTE_SYNC_INTERVAL_SECS").unwrap_or(3);
+        let s3_topology = match std::env::var("KONGODB_S3_TOPOLOGY")
+            .unwrap_or_else(|_| "single".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "multi" => S3Topology::Multi,
+            _ => S3Topology::Single,
+        };
+        let remote_sync_interval_secs = env_u64("KONGODB_REMOTE_SYNC_INTERVAL_SECS").unwrap_or(10);
+        let remote_sync_enabled =
+            matches!(s3_topology, S3Topology::Multi) && remote_sync_interval_secs > 0;
         let job_retention_days = env_u64("KONGODB_JOB_RETENTION_DAYS").unwrap_or(30);
         let backup_path =
             env_nonempty("KONGODB_BACKUP_PATH").unwrap_or_else(|| "./backups".to_string());
@@ -331,7 +350,8 @@ impl KongodbConfig {
                     snapshot_every_writes: env_u64("KONGODB_SNAPSHOT_EVERY_WRITES").unwrap_or(100),
                     snapshot_max_count: 64,
                     snapshot_max_age_days: env_u64("KONGODB_SNAPSHOT_RETENTION_DAYS").unwrap_or(14),
-                    remote_sync_enabled: remote_sync_interval_secs > 0,
+                    topology: s3_topology,
+                    remote_sync_enabled,
                     remote_sync_interval_secs,
                     replication_mode: match std::env::var("KONGODB_REPLICATION_MODE")
                         .unwrap_or_else(|_| "async".to_string())

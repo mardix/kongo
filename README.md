@@ -1332,11 +1332,14 @@ A number of subsystems that used to be individually feature-gated are now **core
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `KONGODB_S3_TOPOLOGY` | `single` | `single` disables cross-instance polling; `multi` enables remote manifest polling while retaining writer leases |
 | `KONGODB_REPLICATION_MODE` | `async` | `sync` waits for remote replication before acknowledging a write; `async` flushes in the background |
 | `KONGODB_PRELOAD_DBS` | empty | Comma-separated db paths to load at startup |
-| `KONGODB_SNAPSHOT_EVERY_WRITES` | `100` | Create a portable snapshot after this many writes |
+| `KONGODB_SNAPSHOT_EVERY_WRITES` | `100` | Target snapshot cadence; recovery currently retains a safe checkpoint per replicated batch |
 | `KONGODB_SNAPSHOT_RETENTION_DAYS` | `14` | How long snapshots are kept |
-| `KONGODB_REMOTE_SYNC_INTERVAL_SECS` | `3` | Remote snapshot polling interval; `0` disables cross-instance polling |
+| `KONGODB_REMOTE_SYNC_INTERVAL_SECS` | `10` | `multi` topology manifest polling interval; ignored in `single`, and `0` disables polling |
+
+Snapshots are stored once as `snapshots/<snapshot_id>.db`. The manifest's `current_snapshot_key` selects the hydration source; Kongo does not upload a duplicate `snapshots/current.db` object.
 
 ### Read / Write / Query Behavior
 
