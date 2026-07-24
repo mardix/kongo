@@ -2640,6 +2640,8 @@ Writer leases, WAL segment size, flush cadence, safe hydrate, integrity checks, 
 
 In S3 mode, `manifest.current_snapshot_key` is authoritative. Snapshot bytes are uploaded once to `snapshots/<snapshot_id>.db`; hydration, verification, and restore resolve the object through the manifest. `single` topology is recommended when only one Kongo process serves the S3 prefix because it avoids continuous manifest GET requests.
 
+The TTL reaper checks active databases on its fixed interval but only publishes an S3 checkpoint when it actually archives, deletes, expires, or transitions data. An idle reaper run does not upload a snapshot.
+
 ### Reads, Writes, and Responses
 
 | Config Name | Default | Description |

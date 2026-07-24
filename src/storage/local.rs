@@ -132,9 +132,7 @@ impl LocalEngine {
             while let Some(result) = jobs.join_next().await {
                 let stats = result
                     .map_err(|e| AppError::Internal(format!("reaper task join failed: {e}")))??;
-                total.moved_to_archive += stats.moved_to_archive;
-                total.deleted_from_archive += stats.deleted_from_archive;
-                total.deleted_metric_events += stats.deleted_metric_events;
+                total.merge(stats);
             }
         }
 

@@ -401,16 +401,16 @@ impl S3WalEngine {
                     let stats =
                         reap_conn(&conn, __kdb_archive_ttl_secs, metric_events_retention_days)
                             .await?;
-                    engine.force_sync_snapshot(&conn, &db_path).await?;
+                    if stats.has_changes() {
+                        engine.force_sync_snapshot(&conn, &db_path).await?;
+                    }
                     Ok::<ReaperStats, AppError>(stats)
                 });
             }
             while let Some(result) = jobs.join_next().await {
                 let stats = result
                     .map_err(|e| AppError::Internal(format!("reaper task join failed: {e}")))??;
-                total.moved_to_archive += stats.moved_to_archive;
-                total.deleted_from_archive += stats.deleted_from_archive;
-                total.deleted_metric_events += stats.deleted_metric_events;
+                total.merge(stats);
             }
         }
 

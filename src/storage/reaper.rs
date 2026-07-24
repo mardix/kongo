@@ -14,6 +14,37 @@ pub struct ReaperStats {
     pub deleted_metric_events: u64,
     pub transitioned_identity_statuses: u64,
     pub deleted_identity_tokens: u64,
+    deleted_live_documents: u64,
+}
+
+impl ReaperStats {
+    pub fn has_changes(&self) -> bool {
+        self.moved_to_archive > 0
+            || self.deleted_from_archive > 0
+            || self.deleted_metric_events > 0
+            || self.transitioned_identity_statuses > 0
+            || self.deleted_identity_tokens > 0
+            || self.deleted_live_documents > 0
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.moved_to_archive = self.moved_to_archive.saturating_add(other.moved_to_archive);
+        self.deleted_from_archive = self
+            .deleted_from_archive
+            .saturating_add(other.deleted_from_archive);
+        self.deleted_metric_events = self
+            .deleted_metric_events
+            .saturating_add(other.deleted_metric_events);
+        self.transitioned_identity_statuses = self
+            .transitioned_identity_statuses
+            .saturating_add(other.transitioned_identity_statuses);
+        self.deleted_identity_tokens = self
+            .deleted_identity_tokens
+            .saturating_add(other.deleted_identity_tokens);
+        self.deleted_live_documents = self
+            .deleted_live_documents
+            .saturating_add(other.deleted_live_documents);
+    }
 }
 
 pub async fn reap_conn(
@@ -53,15 +84,16 @@ pub async fn reap_conn(
     .await
     .map_err(|e| AppError::Internal(format!("reaper live __kdb_archive-delete failed: {e}")))?;
 
-    tx.execute(
-        "DELETE FROM __kdb_documents
+    let deleted_live_documents = tx
+        .execute(
+            "DELETE FROM __kdb_documents
          WHERE _expires_at IS NOT NULL
            AND _expires_at <= ?
            AND lower(coalesce(_expiry_behavior, 'archive')) = 'delete'",
-        libsql::params![now],
-    )
-    .await
-    .map_err(|e| AppError::Internal(format!("reaper live hard-delete failed: {e}")))?;
+            libsql::params![now],
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("reaper live hard-delete failed: {e}")))?;
 
     let deleted_kdb_archive = tx
         .execute(
@@ -171,17 +203,22 @@ pub async fn reap_conn(
         .await
         .map_err(|e| AppError::Internal(format!("reaper tx commit failed: {e}")))?;
 
-    conn.execute("PRAGMA incremental_vacuum", ())
-        .await
-        .map_err(|e| AppError::Internal(format!("reaper incremental vacuum failed: {e}")))?;
-
-    Ok(ReaperStats {
+    let stats = ReaperStats {
         moved_to_archive: moved,
         deleted_from_archive: deleted_kdb_archive,
         deleted_metric_events,
         transitioned_identity_statuses,
         deleted_identity_tokens,
-    })
+        deleted_live_documents,
+    };
+
+    if stats.has_changes() {
+        conn.execute("PRAGMA incremental_vacuum", ())
+            .await
+            .map_err(|e| AppError::Internal(format!("reaper incremental vacuum failed: {e}")))?;
+    }
+
+    Ok(stats)
 }
 
 fn unix_now_secs() -> u64 {
@@ -189,4 +226,45 @@ fn unix_now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReaperStats;
+
+    #[test]
+    fn empty_reaper_stats_have_no_changes() {
+        assert!(!ReaperStats::default().has_changes());
+    }
+
+    #[test]
+    fn hard_deleted_documents_count_as_changes() {
+        let stats = ReaperStats {
+            deleted_live_documents: 1,
+            ..ReaperStats::default()
+        };
+        assert!(stats.has_changes());
+    }
+
+    #[test]
+    fn merge_preserves_all_change_categories() {
+        let mut total = ReaperStats {
+            moved_to_archive: 2,
+            transitioned_identity_statuses: 1,
+            ..ReaperStats::default()
+        };
+        total.merge(ReaperStats {
+            deleted_from_archive: 3,
+            deleted_identity_tokens: 4,
+            deleted_live_documents: 5,
+            ..ReaperStats::default()
+        });
+
+        assert_eq!(total.moved_to_archive, 2);
+        assert_eq!(total.deleted_from_archive, 3);
+        assert_eq!(total.transitioned_identity_statuses, 1);
+        assert_eq!(total.deleted_identity_tokens, 4);
+        assert_eq!(total.deleted_live_documents, 5);
+        assert!(total.has_changes());
+    }
 }

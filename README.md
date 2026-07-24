@@ -1341,6 +1341,8 @@ A number of subsystems that used to be individually feature-gated are now **core
 
 Snapshots are stored once as `snapshots/<snapshot_id>.db`. The manifest's `current_snapshot_key` selects the hydration source; Kongo does not upload a duplicate `snapshots/current.db` object.
 
+Idle TTL reaper checks do not publish snapshots. A reaper checkpoint is created only when lifecycle cleanup actually changes database data.
+
 ### Read / Write / Query Behavior
 
 | Variable | Default | Purpose |

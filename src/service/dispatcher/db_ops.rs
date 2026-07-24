@@ -1403,21 +1403,23 @@ async fn reap_db(
         state.metric_events_retention_days,
     )
     .await?;
-    state
-        .db_manager
-        .append_wal_record(
-            db_path,
-            "REAP_DB",
-            &json!({
-                "moved_to_archive": stats.moved_to_archive,
-                "deleted_from_archive": stats.deleted_from_archive,
-                "deleted_metric_events": stats.deleted_metric_events,
-                "transitioned_identity_statuses": stats.transitioned_identity_statuses,
-                "deleted_identity_tokens": stats.deleted_identity_tokens
-            })
-            .to_string(),
-        )
-        .await?;
+    if stats.has_changes() {
+        state
+            .db_manager
+            .append_wal_record(
+                db_path,
+                "REAP_DB",
+                &json!({
+                    "moved_to_archive": stats.moved_to_archive,
+                    "deleted_from_archive": stats.deleted_from_archive,
+                    "deleted_metric_events": stats.deleted_metric_events,
+                    "transitioned_identity_statuses": stats.transitioned_identity_statuses,
+                    "deleted_identity_tokens": stats.deleted_identity_tokens
+                })
+                .to_string(),
+            )
+            .await?;
+    }
     Ok(GatewayResponse::ok(Some(json!({
         "reaped": true,
         "moved_to_archive": stats.moved_to_archive,
