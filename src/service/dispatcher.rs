@@ -81,6 +81,16 @@ async fn dispatch_inner(
     if req.operation == "system_memory" || req.operation == "get_system_stats" {
         return system_memory(state).await;
     }
+    if req.operation == "__run_document_transitions" && !from_write_worker {
+        return Err(AppError::BadRequest("unknown operation".to_string()));
+    }
+    if req.payload.lifecycle.is_some()
+        && !matches!(req.operation.as_str(), "insert" | "update" | "upsert")
+    {
+        return Err(AppError::BadRequest(
+            "payload.lifecycle is only supported by insert, update, and upsert".to_string(),
+        ));
+    }
     if req.operation == "metrics_ingest" && req.payload.commit.is_none() {
         req.payload.commit = Some(false);
     }
@@ -122,11 +132,6 @@ async fn dispatch_inner(
     if req.operation == "compact_wal" {
         return compact_wal(state, db_path, req).await;
     }
-    if state.legacy_aliases_enabled {
-        let op_name = req.operation.clone();
-        normalize_request_legacy_aliases(op_name.as_str(), &mut req, state)?;
-    }
-
     let is_write_request = request_is_write(&req);
     if !from_write_worker && is_write_request {
         match requested_ack_mode {
@@ -218,10 +223,9 @@ async fn dispatch_inner(
     let operation = req.operation.clone();
     let payload_for_invalidation = req.payload.clone();
     let mut result = match operation.as_str() {
-        "insert" => insert(state, db_path, &conn, req).await,
-        "update" => update(state, &conn, req).await,
-        "upsert" => upsert(state, db_path, &conn, req).await,
-        "set" => set(state, &conn, req).await,
+        "insert" => Box::pin(insert(state, db_path, &conn, req)).await,
+        "update" => Box::pin(update(state, db_path, &conn, req)).await,
+        "upsert" => Box::pin(upsert(state, db_path, &conn, req)).await,
         "get_stats" => get_stats(&conn, req).await,
         "get_db_stats" => get_db_stats(state, db_path).await,
         "snapshot_db_stats" => snapshot_db_stats(state, db_path, &conn).await,
@@ -229,8 +233,8 @@ async fn dispatch_inner(
         "get_system_config" => get_system_config(&conn).await,
         "recompute_stats" => recompute_stats(&conn, req).await,
         "list_namespaces" => list_collections(&conn).await,
-        "list_tables" => list_tables(&conn).await,
-        "get_table_schema" => get_table_schema(&conn, req).await,
+        "sql_list_tables" => sql_list_tables(&conn).await,
+        "sql_get_table_schema" => sql_get_table_schema(&conn, req).await,
         "change_namespace" => change_namespace(state, db_path, &conn, req).await,
         "rename_namespace" => rename_namespace(&conn, req).await,
         "vacuum_db" => vacuum(&conn).await,
@@ -245,16 +249,22 @@ async fn dispatch_inner(
         "list_indexes" => list_index_op(&conn).await,
         "reindex_fts" => reindex_fts_op(state, &conn).await,
         "drop_fts_index" => drop_fts_index_op(&conn).await,
-        "enable_fts_index" | "enable_ftx_index" => enable_fts_index_op(state, &conn, req).await,
+        "enable_fts_index" => enable_fts_index_op(state, &conn, req).await,
         "delete" => delete(state, db_path, &conn, req).await,
         "drop_namespace" => drop_collection(state, db_path, &conn, req).await,
         "purge_archive" => purge_kdb_archive(&conn, req).await,
         "restore_archive" => restore_kdb_archive(&conn, req).await,
         "set_ttl" => set_ttl(&conn, req).await,
-        "get" => get(state, db_path, &conn, req).await,
+        "schedule_transition" => Box::pin(schedule_transition(state, db_path, &conn, req)).await,
+        "cancel_transition" => Box::pin(cancel_transition(state, db_path, &conn, req)).await,
+        "get_transition" => Box::pin(get_transition(&conn, req)).await,
+        "list_transitions" => Box::pin(list_transitions(&conn, req)).await,
+        "retry_transition" => Box::pin(retry_transition(state, db_path, &conn, req)).await,
+        "__run_document_transitions" => {
+            Box::pin(process_due_document_transitions(state, db_path, &conn)).await
+        }
         "count" => count(state, db_path, &conn, req).await,
         "sql_execute" => sql_execute(state, db_path, &conn, req).await,
-        "search" => search(state, db_path, &conn, req).await,
         "aggregate" => aggregate(state, db_path, &conn, req).await,
         "query" => query(state, db_path, &conn, req).await,
         "export_jsonl" => export_jsonl(state, db_path, &conn, req).await,
@@ -266,7 +276,7 @@ async fn dispatch_inner(
         "audit_query" => Box::pin(audit_query(state, &conn, req)).await,
         "user_create" => user_create(state, &conn, req).await,
         "user_get" => user_get(&conn, req).await,
-        "user_list" => user_list(&conn, req).await,
+        "user_query" => user_query(&conn, req).await,
         "user_get_details" => user_get_details(&conn, req).await,
         "user_update" => user_update(state, &conn, req).await,
         "user_update_status" => user_update_status(&conn, req).await,
@@ -276,7 +286,7 @@ async fn dispatch_inner(
         "user_unlink_provider" => user_unlink_provider(&conn, req).await,
         "file_create" => file_create(state, &conn, req).await,
         "file_get" => file_get(&conn, req).await,
-        "file_list" => file_list(&conn, req).await,
+        "file_query" => file_query(&conn, req).await,
         "file_update" => file_update(state, &conn, req).await,
         "file_delete" => file_delete(&conn, req).await,
         "get_job" => get_job(&conn, req).await,
@@ -286,12 +296,6 @@ async fn dispatch_inner(
         "transaction" => transaction(state, db_path, &conn, req).await,
         other => Err(AppError::BadRequest(format!("unknown operation: {other}"))),
     };
-
-    if let Ok(response) = result.as_mut() {
-        if state.legacy_aliases_enabled {
-            apply_response_legacy_aliases(response, state);
-        }
-    }
 
     if result.is_ok() && is_write_request {
         invalidate_read_cache_after_write(state, db_path, &operation, &payload_for_invalidation);
@@ -326,6 +330,7 @@ include!("dispatcher/metric_events_ops.rs");
 include!("dispatcher/audit_logs_ops.rs");
 include!("dispatcher/identity_ops.rs");
 include!("dispatcher/file_ops.rs");
+include!("dispatcher/lifecycle_ops.rs");
 
 include!("dispatcher/jobs_ops.rs");
 include!("dispatcher/tx_mutation.rs");

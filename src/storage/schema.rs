@@ -65,6 +65,28 @@ CREATE TABLE IF NOT EXISTS __kdb_system_config (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS __kdb_document_transitions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    name TEXT NOT NULL,
+    execute_at TEXT NOT NULL,
+    condition_json ANY NOT NULL,
+    update_json ANY NOT NULL,
+    ttl_seconds INTEGER,
+    expiry_behavior TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'running', 'completed', 'skipped', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    skipped_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(document_id, name)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS __kdb_db_stats_rollups (
     ts TEXT PRIMARY KEY,
     requests_total INTEGER NOT NULL DEFAULT 0,
@@ -212,7 +234,6 @@ CREATE TABLE IF NOT EXISTS __kdb_jobs (
     collection TEXT,
     source_path TEXT,
     source_hash TEXT,
-    alias_import_pk TEXT,
     drop_keys_json TEXT,
     on_conflict TEXT,
     ignore_input_id INTEGER NOT NULL DEFAULT 0,
@@ -287,6 +308,10 @@ CREATE INDEX IF NOT EXISTS idx__kdb_files_bucket_status_uploaded
 CREATE INDEX IF NOT EXISTS idx__kdb_files_expires
     ON __kdb_files(expires_at)
     WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx__kdb_document_transitions_due
+    ON __kdb_document_transitions(status, execute_at);
+CREATE INDEX IF NOT EXISTS idx__kdb_document_transitions_document
+    ON __kdb_document_transitions(document_id, status);
 
 CREATE INDEX IF NOT EXISTS idx___kdb_documents_expires_at
     ON __kdb_documents(_expires_at) WHERE _expires_at IS NOT NULL;
@@ -547,6 +572,63 @@ mod tests {
         assert_eq!(row.get::<String>(0).unwrap(), "__kdb_audit_logs");
 
         drop(rows);
+        drop(conn);
+        drop(db);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn blank_database_initializes_document_lifecycle_schema() {
+        let path = std::env::temp_dir().join(format!(
+            "kongodb_lifecycle_schema_{}.db",
+            Uuid::new_v4().simple()
+        ));
+        let db = Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+
+        init_schema_with_retry(&conn, false).await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name = '__kdb_document_transitions'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "__kdb_document_transitions"
+        );
+        drop(rows);
+
+        let mut index_rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name IN (
+                   'idx__kdb_document_transitions_due',
+                   'idx__kdb_document_transitions_document'
+                 )",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            index_rows
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            2
+        );
+
+        drop(index_rows);
         drop(conn);
         drop(db);
         let _ = tokio::fs::remove_file(path).await;

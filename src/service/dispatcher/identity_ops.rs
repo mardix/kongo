@@ -137,7 +137,7 @@ async fn user_get(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<G
     Ok(GatewayResponse::ok(Some(json!({"item": item}))))
 }
 
-async fn user_list(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<GatewayResponse> {
+async fn user_query(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<GatewayResponse> {
     let payload = req.payload;
     let page = payload.page.unwrap_or(1).max(1);
     let limit = payload
@@ -195,12 +195,12 @@ async fn user_list(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<
             page_binds,
         )
         .await
-        .map_err(|e| AppError::Internal(format!("user_list query failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("user_query query failed: {e}")))?;
     let mut items = Vec::<Value>::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("user_list row read failed: {e}")))?
+        .map_err(|e| AppError::Internal(format!("user_query row read failed: {e}")))?
     {
         let mut item = identity_user_from_row(&row)?;
         enrich_identity_user(conn, &mut item).await?;
@@ -691,14 +691,14 @@ async fn identity_count(
             binds,
         )
         .await
-        .map_err(|e| AppError::Internal(format!("user_list count failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("user_query count failed: {e}")))?;
     if let Some(row) = rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("user_list count row failed: {e}")))?
+        .map_err(|e| AppError::Internal(format!("user_query count row failed: {e}")))?
     {
         row.get::<i64>(0)
-            .map_err(|e| AppError::Internal(format!("user_list count decode failed: {e}")))
+            .map_err(|e| AppError::Internal(format!("user_query count decode failed: {e}")))
     } else {
         Ok(0)
     }

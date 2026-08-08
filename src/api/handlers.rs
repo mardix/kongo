@@ -7,9 +7,9 @@ use axum::{
     response::Html,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use pulldown_cmark::{Options, Parser, html};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd, html};
 use serde_json::json;
-use std::{fs, time::Duration};
+use std::{collections::HashMap, fs, time::Duration};
 
 use crate::{
     api::dto::{GatewayRequest, GatewayResponse},
@@ -312,6 +312,147 @@ pub async fn ping() -> Json<serde_json::Value> {
     }))
 }
 
+#[derive(Debug)]
+struct DocsHeading {
+    level: HeadingLevel,
+    title: String,
+    id: String,
+}
+
+fn docs_markdown_options() -> Options {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
+    options
+}
+
+fn render_docs_markdown(markdown: &str) -> (String, String) {
+    let options = docs_markdown_options();
+    let headings = collect_docs_headings(markdown, options);
+    let toc = render_docs_toc(&headings);
+    let mut heading_index = 0usize;
+    let parser = Parser::new_ext(markdown, options).map(|event| match event {
+        Event::Start(Tag::Heading {
+            level,
+            classes,
+            attrs,
+            ..
+        }) => {
+            let id = headings
+                .get(heading_index)
+                .map(|heading| heading.id.clone())
+                .unwrap_or_else(|| format!("section-{}", heading_index + 1));
+            heading_index += 1;
+            Event::Start(Tag::Heading {
+                level,
+                id: Some(id.into()),
+                classes,
+                attrs,
+            })
+        }
+        other => other,
+    });
+    let mut body = String::new();
+    html::push_html(&mut body, parser);
+    (body, toc)
+}
+
+fn collect_docs_headings(markdown: &str, options: Options) -> Vec<DocsHeading> {
+    let mut headings = Vec::new();
+    let mut current: Option<(HeadingLevel, Option<String>, String)> = None;
+    let mut used_ids = HashMap::<String, usize>::new();
+
+    for event in Parser::new_ext(markdown, options) {
+        match event {
+            Event::Start(Tag::Heading { level, id, .. }) => {
+                current = Some((level, id.map(String::from), String::new()));
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, _, title)) = current.as_mut() {
+                    title.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some((_, _, title)) = current.as_mut() {
+                    title.push(' ');
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some((level, explicit_id, title)) = current.take() {
+                    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let fallback = format!("section-{}", headings.len() + 1);
+                    let base_id = explicit_id
+                        .filter(|id| !id.trim().is_empty())
+                        .unwrap_or_else(|| slugify_docs_heading(&title, &fallback));
+                    let count = used_ids.entry(base_id.clone()).or_insert(0);
+                    *count += 1;
+                    let id = if *count == 1 {
+                        base_id
+                    } else {
+                        format!("{base_id}-{}", *count)
+                    };
+                    headings.push(DocsHeading { level, title, id });
+                }
+            }
+            _ => {}
+        }
+    }
+    headings
+}
+
+fn slugify_docs_heading(title: &str, fallback: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for ch in title.chars() {
+        if ch.is_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            for lower in ch.to_lowercase() {
+                slug.push(lower);
+            }
+            pending_dash = false;
+        } else if !slug.is_empty() {
+            pending_dash = true;
+        }
+    }
+    if slug.is_empty() {
+        fallback.to_string()
+    } else {
+        slug
+    }
+}
+
+fn render_docs_toc(headings: &[DocsHeading]) -> String {
+    let mut toc = String::from("<ul class=\"toc-list\">");
+    for heading in headings.iter().filter(|heading| {
+        matches!(
+            heading.level,
+            HeadingLevel::H2 | HeadingLevel::H3 | HeadingLevel::H4
+        )
+    }) {
+        let level = heading.level as u8;
+        toc.push_str(&format!(
+            "<li class=\"toc-level-{level}\"><a href=\"#{}\">{}</a></li>",
+            escape_docs_html(&heading.id),
+            escape_docs_html(&heading.title)
+        ));
+    }
+    toc.push_str("</ul>");
+    toc
+}
+
+fn escape_docs_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
     let md = fs::read_to_string(&state.docs_file).map_err(|e| {
         AppError::Internal(format!(
@@ -319,23 +460,21 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
             state.docs_file
         ))
     })?;
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TASKLISTS);
-    let parser = Parser::new_ext(&md, options);
-    let mut body = String::new();
-    html::push_html(&mut body, parser);
+    let (body, toc) = render_docs_markdown(&md);
     let page = format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kongodb Docs</title>
+  <title>Kongo Documentation</title>
   <style>
     * {{
       box-sizing: border-box;
+    }}
+
+    html {{
+      scroll-behavior: smooth;
     }}
 
     body {{
@@ -347,14 +486,121 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
       padding: 1rem;
     }}
 
-    main {{
-      max-width: 1000px;
+    .docs-layout {{
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1000px);
+      align-items: start;
+      gap: 1rem;
+      max-width: 1300px;
       margin: 0 auto;
+    }}
+
+    .docs-sidebar {{
+      position: sticky;
+      top: 1rem;
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 2rem);
+      overflow: hidden;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+
+    .docs-sidebar-header {{
+      flex: 0 0 auto;
+      padding: 1rem;
+      border-bottom: 1px solid #e5e7eb;
+    }}
+
+    .docs-sidebar-title {{
+      margin: 0;
+      color: #082f49;
+      font-size: 1rem;
+      font-weight: 700;
+      line-height: 1.2;
+    }}
+
+    .docs-sidebar-subtitle {{
+      margin: 0.3rem 0 0;
+      color: #64748b;
+      font-size: 0.75rem;
+      line-height: 1.4;
+    }}
+
+    .docs-toc {{
+      min-height: 0;
+      overflow-y: auto;
+      padding: 0.6rem;
+      scrollbar-color: #cbd5e1 transparent;
+      scrollbar-width: thin;
+    }}
+
+    .toc-list {{
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }}
+
+    .toc-list li {{
+      margin: 0;
+    }}
+
+    .toc-list a {{
+      display: block;
+      border-radius: 6px;
+      padding: 0.35rem 0.5rem;
+      color: #475569;
+      font-size: 0.78rem;
+      line-height: 1.35;
+      text-decoration: none;
+    }}
+
+    .toc-list a:hover {{
+      background: #f0f9ff;
+      color: #075985;
+      text-decoration: none;
+    }}
+
+    .toc-level-2 a {{
+      margin-top: 0.35rem;
+      color: #0f172a;
+      font-weight: 700;
+    }}
+
+    .toc-level-3 a {{
+      padding-left: 1rem;
+      font-weight: 600;
+    }}
+
+    .toc-level-4 a {{
+      padding-left: 1.6rem;
+      color: #64748b;
+    }}
+
+    main {{
+      min-width: 0;
+      width: 100%;
       background: #ffffff;
       border: 1px solid #e5e7eb;
       border-radius: 12px;
       padding: 2rem;
       box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+
+    @media (max-width: 900px) {{
+      .docs-layout {{
+        display: block;
+      }}
+
+      .docs-sidebar {{
+        position: relative;
+        top: auto;
+        height: auto;
+        max-height: 340px;
+        margin-bottom: 0.75rem;
+      }}
     }}
 
     @media (max-width: 640px) {{
@@ -373,6 +619,7 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
       margin-bottom: 0.5em;
       font-weight: 600;
       line-height: 1.25;
+      scroll-margin-top: 1rem;
     }}
 
     h1 {{
@@ -504,13 +751,29 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
     input[type="checkbox"] {{
       margin-right: 0.5em;
     }}
+
+    @media print {{
+      body {{ padding: 0; }}
+      .docs-layout {{ display: block; max-width: none; }}
+      .docs-sidebar {{ display: none; }}
+      main {{ border: 0; box-shadow: none; }}
+    }}
   </style>
 </head>
 <body>
-  <main>{}</main>
+  <div class="docs-layout">
+    <aside class="docs-sidebar">
+      <div class="docs-sidebar-header">
+        <div class="docs-sidebar-title">Kongo Documentation</div>
+        <p class="docs-sidebar-subtitle">Contents</p>
+      </div>
+      <nav class="docs-toc" aria-label="Documentation table of contents">{}</nav>
+    </aside>
+    <main>{}</main>
+  </div>
 </body>
 </html>"#,
-        body
+        toc, body
     );
     Ok(Html(page))
 }
@@ -520,6 +783,7 @@ pub async fn meta_operations(
     headers: HeaderMap,
 ) -> AppResult<Json<serde_json::Value>> {
     validate_access_key(&state, &headers)?;
+    let gateway_path = format!("{}/gateway", state.base_path);
     let payload = format!(
         r#"{{
   "service":"kongodb",
@@ -540,10 +804,14 @@ pub async fn meta_operations(
     "get_system_stats":{{"writes":false,"required":[],"optional":[],"description":"Instance-local in-memory uptime, request counters, rolling windows, process memory, active DBs, and write queue usage"}},
     "system_memory":{{"writes":false,"required":[],"optional":[],"description":"Process memory usage + write queue usage for this instance, including system_stats"}},
     "cleanup_temp_artifacts":{{"writes":true,"required":[],"optional":["older_than_secs(default=600)"],"description":"Delete stale temp files (`._tmp_*`,`_tmp_*`) under data dir"}},
-    "insert":{{"writes":true,"required":["namespace","data(object|array<object>)"],"optional":["_user_id","ttl_seconds","expiry_behavior(archive|delete)","allow_system_timestamps","unique_fields(composite)","on_conflict(skip|error)","commit","dry_run"],"description":"Insert one or many documents. _user_id can be supplied in payload or per data object and is stored as a document column. commit=false returns prepared pending items with generated ids/timestamps before the queued write commits"}},
-    "update":{{"writes":true,"required":["data(object with _id)|filter+data(object)|data(array<object with _id>)"],"optional":["namespace|scope=all","replace(single only)","max_docs","commit","dry_run"],"description":"Update one or many documents. replace=true is only allowed for single-document update by _id. commit=false explicit-id updates return prepared pending items; filter updates return queued acknowledgement"}},
-    "set":{{"writes":true,"required":["data(object with _id)"],"optional":["namespace","_user_id","ttl_seconds","expiry_behavior(archive|delete)","dry_run"],"description":"Set one document by _id: with namespace => upsert; without namespace => update-only (not-found if missing). _user_id is stored as a document column"}},
-    "upsert":{{"writes":true,"required":["filter","insert_data"],"optional":["_user_id","update_data","expiry_behavior(archive|delete)","max_docs","dry_run"],"description":"Update matches or insert on miss. _user_id applies to the insert path"}},
+    "insert":{{"writes":true,"required":["namespace","data(object|array<object>)"],"optional":["_user_id","ttl_seconds","expiry_behavior(archive|delete)","lifecycle(single insert only)","allow_system_timestamps","unique_fields(composite)","on_conflict(skip|error)","commit","dry_run"],"description":"Insert one or many documents. A singular insert may atomically schedule named lifecycle transitions. _user_id can be supplied in payload or per data object and is stored as a document column. commit=false returns prepared pending items with generated ids/timestamps before the queued write commits"}},
+    "schedule_transition":{{"writes":true,"required":["document_id|id","name","at|after_seconds","when","update"],"optional":["namespace","ttl_seconds","expiry_behavior"],"description":"Create or replace one named pending lifecycle transition for an existing document"}},
+    "cancel_transition":{{"writes":true,"required":["transition_id|document_id+name"],"optional":[],"description":"Cancel a pending lifecycle transition while preserving its history row"}},
+    "get_transition":{{"writes":false,"required":["transition_id|document_id+name"],"optional":[],"description":"Fetch one document lifecycle transition"}},
+    "list_transitions":{{"writes":false,"required":[],"optional":["document_id","namespace","name","status","execute_at_from","execute_at_to","limit","offset","page","per_page"],"description":"List and paginate document lifecycle transitions"}},
+    "retry_transition":{{"writes":true,"required":["transition_id|document_id+name"],"optional":["at|after_seconds"],"description":"Return a failed lifecycle transition to pending; failures never retry automatically"}},
+    "update":{{"writes":true,"required":["data(object with _id)|filter+data(object)|data(array<object with _id>)"],"optional":["namespace|scope=all","replace(single only)","lifecycle(explicit single id only)","max_docs","commit","dry_run"],"description":"Update one or many documents. A singular explicit-id update may atomically add or replace named lifecycle transitions. replace=true is only allowed for single-document update by _id. commit=false explicit-id updates return prepared pending items; filter updates return queued acknowledgement"}},
+    "upsert":{{"writes":true,"required":["namespace","filter","insert_data"],"optional":["_user_id","update_data","expiry_behavior(archive|delete)","lifecycle(max_docs=1 only)","max_docs","dry_run"],"description":"Update matches or insert on miss. Singular upserts may atomically schedule named lifecycle transitions. An exact _id or _id.$eq filter becomes the inserted _id; _id remains prohibited in insert_data/update_data"}},
     "get_stats":{{"writes":false,"required":["namespace"],"optional":[],"description":"Live/archive stats for one namespace"}},
     "get_db_stats":{{"writes":false,"required":[],"optional":[],"description":"Return current in-memory request counters for the current db"}},
     "snapshot_db_stats":{{"writes":true,"required":[],"optional":[],"description":"Persist one current-db stats snapshot into __kdb_db_stats_rollups"}},
@@ -551,12 +819,12 @@ pub async fn meta_operations(
     "get_system_config":{{"writes":false,"required":[],"optional":[],"description":"List key/value rows from the internal system config table for current db"}},
     "recompute_stats":{{"writes":true,"required":[],"optional":[],"description":"Enqueue admin job to recompute __kdb_system_stats globally"}},
     "list_namespaces":{{"writes":false,"required":[],"optional":[],"description":"List namespaces with live/archive stats"}},
-    "list_tables":{{"writes":false,"required":[],"optional":[],"description":"List user-created tables for the current db (excludes __kdb_* and sqlite_* tables)"}},
-    "get_table_schema":{{"writes":false,"required":["table"],"optional":[],"description":"Return schema columns for one user-created SQL table. Safely wraps PRAGMA table_info without exposing PRAGMA through sql_execute"}},
+    "sql_list_tables":{{"writes":false,"required":[],"optional":[],"description":"List user-created tables for the current db (excludes __kdb_* and sqlite_* tables)"}},
+    "sql_get_table_schema":{{"writes":false,"required":["table"],"optional":[],"description":"Return schema columns for one user-created SQL table. Safely wraps PRAGMA table_info without exposing PRAGMA through sql_execute"}},
     "change_namespace":{{"writes":true,"required":["from_namespace","to_namespace"],"optional":["ids|filter|max_docs|dry_run"],"description":"Move documents from one namespace to another by updating namespace and stats"}},
     "rename_namespace":{{"writes":true,"required":["from_namespace","to_namespace"],"optional":[],"description":"Rename a namespace across live+__kdb_archive tables and refresh stats"}},
     "vacuum_db":{{"writes":true,"required":[],"optional":[],"description":"Enqueue admin job to run SQLite VACUUM (rebuild/compact database file)"}},
-    "reap_db":{{"writes":true,"required":[],"optional":[],"description":"Run TTL reaper now for current db"}},
+    "reap_db":{{"writes":true,"required":[],"optional":[],"description":"Run TTL/archive cleanup and due document lifecycle transitions now for current db"}},
     "load_db":{{"writes":true,"required":[],"optional":[],"description":"s3 only: load and warm db into memory/cache without querying. Returns loaded=true if newly loaded, false if already loaded"}},
     "sync_db":{{"writes":true,"required":[],"optional":[],"description":"s3 only: force snapshot+manifest sync for current db"}},
     "create_snapshot":{{"writes":true,"required":[],"optional":[],"description":"Alias of sync_db"}},
@@ -582,11 +850,9 @@ pub async fn meta_operations(
     "set_ttl":{{"writes":true,"required":["ids|filter","ttl_seconds"],"optional":["namespace|scope=all","expiry_behavior(archive|delete)","max_docs","dry_run"],"description":"Set/reset document TTL and optional expiry behavior. ids mode allows optional namespace; filter mode requires namespace unless scope=all"}},
     "purge_archive":{{"writes":true,"required":["txn_id|ids|namespace/filter"],"optional":["dry_run"],"description":"Hard delete documents from archive only (txn_id maps to archive _txn_id)"}},
     "restore_archive":{{"writes":true,"required":["txn_id|ids|namespace/filter"],"optional":["on_conflict(skip|replace|patch)","dry_run"],"description":"Restore documents from archive. on_conflict controls skip/replace/patch; txn_id maps to archive _txn_id"}},
-    "get":{{"writes":false,"required":["id|data._id|ids"],"optional":["namespace|namespaces|scope=all","_user_id","attach_users","attach_user_fields(default=id,first_name,last_name,profile_photo)","include_archive","archive_only","fields","exclude_fields","include_namespace(include_name)","cache","force_db"],"description":"Read one/many by id(s). namespace optional; if provided, match must satisfy namespace + id(s). By default, explicit id reads check pending accepted insert/update previews first; force_db=true reads durable DB rows only. attach_users side-loads Identity users into attachments.users"}},
     "count":{{"writes":false,"required":[],"optional":["namespace|scope=all","filter","include_archive","archive_only","cache"],"description":"Count matching documents"}},
     "aggregate":{{"writes":false,"required":["compute"],"optional":["namespace|scope=all","filter","include_archive","archive_only","cache"],"description":"Set-level compute metrics over matched documents"}},
-    "search":{{"writes":false,"required":["namespace|namespaces|namespace='*'","search"],"optional":["_user_id","attach_users","attach_user_fields(default=id,first_name,last_name,profile_photo)","filter","sort(object|string)","limit","offset","page","per_page","lookups(map)","lookup_depth_override","fields","exclude_fields","include_namespace(include_name)","cache"],"description":"FTS search over live documents using SQLite FTS5 MATCH (requires enabled FTS). attach_users side-loads Identity users into attachments.users"}},
-    "query":{{"writes":false,"required":["namespace|namespaces|namespace='*'"],"optional":["_user_id","attach_users","attach_user_fields(default=id,first_name,last_name,profile_photo)","filter","sort(object|string)","limit","offset","page","per_page","compute","lookups(map)","lookup_depth_override","fields","exclude_fields","include_namespace(include_name)","include_archive","archive_only","explain","cache"],"description":"Query documents with optional per-item compute, lookup joins, and user attachments"}},
+    "query":{{"writes":false,"required":["namespace|namespaces|namespace='*'"],"optional":["search","_user_id","attach_users","attach_user_fields(default=id,first_name,last_name,profile_photo)","filter","sort(object|string)","limit","offset","page","per_page","compute","lookups(map)","lookup_depth_override","fields","exclude_fields","include_namespace(include_name)","include_archive","archive_only","explain","cache","force_db"],"description":"Query documents, or run live-document FTS when payload.search is present. Exact _id/_id.$in filters see pending accepted writes unless force_db=true. FTS defaults to _search_score ASC, _created_at DESC"}},
     "metrics_ingest":{{"writes":true,"required":["events(array<object>)"],"optional":["commit(default=false)"],"description":"Append metric events. events[] requires event; ts defaults to server UTC now; value defaults to 1; dimensions/metadata must be objects when provided"}},
     "metrics_query":{{"writes":false,"required":["event|events","range|start+end","metrics"],"optional":["alias","label","interval","bucket_label","filter","group_by","sort","limit","offset","batch"],"description":"Aggregate metric events into named result sets with groups and metrics labels"}},
     "metrics_catalog":{{"writes":false,"required":[],"optional":["type(event|dimension)","name","value","limit","offset"],"description":"List discovered metrics catalog entries. Ingest registers event names and dimension paths as type/name/value rows"}},
@@ -594,7 +860,7 @@ pub async fn meta_operations(
     "audit_query":{{"writes":false,"required":[],"optional":["search","action","actor_type","actor_id","target_type","target_id","status","source","request_id","start","end","limit","offset","page","per_page"],"description":"Query append-only audit logs newest first with structured filters and pagination"}},
     "user_create":{{"writes":true,"required":[],"optional":["user_id","email","username","phone","first_name","last_name","profile_photo","status(default=active)","status_reason","password_hash","password_algo","requires_password_change(default=false)","provider","provider_user_id","data"],"description":"Create identity user metadata. Does not authenticate; password_hash/token values are app-provided"}},
     "user_get":{{"writes":false,"required":["user_id|id|email|username|provider+provider_user_id"],"optional":[],"description":"Fetch one identity user by local id, email, username, or provider mapping"}},
-    "user_list":{{"writes":false,"required":[],"optional":["search|q","status","email","username","limit","offset","page","per_page"],"description":"List/query identity users with pagination"}},
+    "user_query":{{"writes":false,"required":[],"optional":["search|q","status","email","username","limit","offset","page","per_page"],"description":"List/query identity users with pagination"}},
     "user_get_details":{{"writes":false,"required":["user_id|id|email|username"],"optional":[],"description":"Fetch one identity user with login methods, providers, and recent identity events"}},
     "user_update":{{"writes":true,"required":["user_id|id"],"optional":["email","username","phone","first_name","last_name","profile_photo","requires_password_change","email_verified_at","phone_verified_at","data"],"description":"Update identity user profile metadata and app data; does not authenticate"}},
     "user_update_status":{{"writes":true,"required":["user_id|id","status"],"optional":["status_reason","status_expires_at|status_expires_in","status_next","status_next_reason","changed_by"],"description":"Update app-defined user status and optionally schedule a future transition; logs an identity event"}},
@@ -604,12 +870,12 @@ pub async fn meta_operations(
     "user_unlink_provider":{{"writes":true,"required":["provider","provider_user_id"],"optional":["user_id|id"],"description":"Unlink one provider identity; user_id makes the unlink strict when provided"}},
     "file_create":{{"writes":true,"required":["storage_backend","storage_path"],"optional":["id(dashless uuid4)","bucket(default=default)","filename","content_type","size_bytes","sha256","status(default=active)","owner_type","owner_id","metadata","uploaded_at(default=now)","expires_at"],"description":"Create file/object metadata only. Kongodb does not upload, download, or delete file bytes"}},
     "file_get":{{"writes":false,"required":["id"],"optional":[],"description":"Fetch one file metadata row by id"}},
-    "file_list":{{"writes":false,"required":[],"optional":["bucket","status","owner_type","owner_id","storage_backend","content_type","search|q","limit","offset","page","per_page"],"description":"List/query file metadata rows with pagination"}},
+    "file_query":{{"writes":false,"required":[],"optional":["bucket","status","owner_type","owner_id","storage_backend","content_type","search|q","limit","offset","page","per_page"],"description":"List/query file metadata rows with pagination"}},
     "file_update":{{"writes":true,"required":["id"],"optional":["bucket","storage_backend","storage_path","filename","content_type","size_bytes","sha256","status","owner_type","owner_id","metadata","uploaded_at","expires_at"],"description":"Update mutable file metadata only; does not move object bytes"}},
     "file_delete":{{"writes":true,"required":["id"],"optional":["purge"],"description":"Soft delete file metadata by default (status=deleted). purge=true hard-deletes metadata row only"}},
     "sql_execute":{{"writes":true,"required":["sql"],"optional":["params","commit"],"description":"Config-gated direct SQL execution. Supports a single SELECT/WITH/EXPLAIN/INSERT/UPDATE/DELETE/REPLACE statement, plus CREATE TABLE, CREATE INDEX, DROP INDEX, and ALTER TABLE ... ADD COLUMN for non-__kdb_* objects; write statements follow normal commit=false accepted-ack queue behavior"}},
     "export_jsonl":{{"writes":true,"required":[],"optional":["target_path","compress(default=true)","include_system_timestamps(default=true)","namespace|scope=all","filter","sort(object|string)","limit","offset","page","per_page","fields","exclude_fields","include_archive","archive_only"],"description":"Create async JSONL export job and return job_id + resolved target_path"}},
-    "import_jsonl":{{"writes":true,"required":["namespace","source_path"],"optional":["source_hash","alias_import_pk","drop_keys","on_conflict(error|skip|replace|merge)","ignore_input_id","allow_system_timestamps","batch_size","resumable"],"description":"Create async JSONL import job and return job_id. Background worker streams batches into namespace"}},
+    "import_jsonl":{{"writes":true,"required":["namespace","source_path"],"optional":["source_hash","drop_keys","on_conflict(error|skip|replace|merge)","ignore_input_id","allow_system_timestamps","batch_size","resumable"],"description":"Create async JSONL import job and return job_id. Background worker streams batches into namespace"}},
     "get_job":{{"writes":false,"required":["job_id"],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)"],"description":"Get one async job by id"}},
     "list_jobs":{{"writes":false,"required":[],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)","status","limit","offset"],"description":"List async jobs across supported job types"}},
     "continue_job":{{"writes":true,"required":["job_id"],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)"],"description":"Resume/retry a job when supported by its job type"}},
@@ -618,10 +884,37 @@ pub async fn meta_operations(
   }}
 }}"#,
         env!("CARGO_PKG_VERSION"),
-        format!("{}{}", state.base_path, "/gateway")
+        gateway_path
     );
     let value = serde_json::from_str(&payload).unwrap_or_else(
         |_| json!({"status":"error","error":"meta/operations payload build failed"}),
     );
     Ok(Json(value))
+}
+
+#[cfg(test)]
+mod docs_tests {
+    use super::render_docs_markdown;
+
+    #[test]
+    fn docs_renderer_builds_toc_and_heading_anchors() {
+        let (body, toc) = render_docs_markdown(
+            "# Kongo\n\n## API Surface\n\n### `query` operation\n\n## API Surface\n",
+        );
+
+        assert!(body.contains("<h2 id=\"api-surface\">API Surface</h2>"));
+        assert!(body.contains("<h3 id=\"query-operation\"><code>query</code> operation</h3>"));
+        assert!(body.contains("<h2 id=\"api-surface-2\">API Surface</h2>"));
+        assert!(toc.contains("href=\"#api-surface\""));
+        assert!(toc.contains("href=\"#query-operation\""));
+        assert!(toc.contains("href=\"#api-surface-2\""));
+    }
+
+    #[test]
+    fn docs_renderer_ignores_heading_text_inside_code_blocks() {
+        let (_, toc) = render_docs_markdown("## Real section\n\n```md\n## Not a section\n```\n");
+
+        assert!(toc.contains("Real section"));
+        assert!(!toc.contains("Not a section"));
+    }
 }

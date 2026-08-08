@@ -15,7 +15,6 @@ pub struct KongodbConfig {
     pub json_storage: JsonStorageConfig,
     pub query: QueryConfig,
     pub query_lookup: QueryLookupConfig,
-    pub legacy_aliases: LegacyAliasesConfig,
     pub auto_index: AutoIndexConfig,
     pub import: ImportConfig,
     pub export: ExportConfig,
@@ -167,13 +166,6 @@ pub enum JsonStorageFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {
     pub default_limit: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LegacyAliasesConfig {
-    pub enabled: bool,
-    pub import_pk: Vec<(String, String)>,
-    pub response: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,15 +399,6 @@ impl KongodbConfig {
             query: QueryConfig {
                 default_limit: env_usize("KONGODB_QUERY_DEFAULT_LIMIT").unwrap_or(50),
             },
-            legacy_aliases: LegacyAliasesConfig {
-                enabled: env_bool("KONGODB_ENABLE_LEGACY_ALIASES").unwrap_or(false),
-                import_pk: parse_alias_map(
-                    &std::env::var("KONGODB_LEGACY_ALIASES_IMPORT_PK").unwrap_or_default(),
-                ),
-                response: parse_alias_map(
-                    &std::env::var("KONGODB_LEGACY_ALIASES_RESPONSE").unwrap_or_default(),
-                ),
-            },
             query_lookup: QueryLookupConfig {
                 max_depth: env_usize("KONGODB_QUERY_LOOKUP_MAX_DEPTH").unwrap_or(3),
                 uncapped_override_enabled: env_bool(
@@ -591,18 +574,4 @@ fn env_s3_credentials(prefix: &str) -> Option<S3Credentials> {
         }
         _ => None,
     }
-}
-
-fn parse_alias_map(raw: &str) -> Vec<(String, String)> {
-    raw.split(',')
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, ':');
-            let from = parts.next()?.trim();
-            let to = parts.next()?.trim();
-            if from.is_empty() || to.is_empty() {
-                return None;
-            }
-            Some((from.to_string(), to.to_string()))
-        })
-        .collect()
 }

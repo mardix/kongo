@@ -168,10 +168,44 @@ async fn purge_kdb_archive(
         }))));
     }
 
+    let mut id_rows = conn
+        .query(
+            &format!("SELECT id FROM __kdb_archive WHERE {where_clause}"),
+            binds.clone(),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("purge transition target query failed: {e}")))?;
+    let mut purged_ids = Vec::<String>::new();
+    while let Some(row) = id_rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("purge transition target row failed: {e}")))?
+    {
+        purged_ids.push(row.get(0).map_err(|e| {
+            AppError::Internal(format!("purge transition target decode failed: {e}"))
+        })?);
+    }
+    drop(id_rows);
+
     let deleted = conn
         .execute(&format!("DELETE FROM __kdb_archive WHERE {where_clause}"), binds)
         .await
         .map_err(|e| AppError::Internal(format!("purge failed: {e}")))?;
+
+    if !purged_ids.is_empty() {
+        let placeholders = vec!["?"; purged_ids.len()].join(", ");
+        conn.execute(
+            &format!(
+                "DELETE FROM __kdb_document_transitions WHERE document_id IN ({placeholders})"
+            ),
+            purged_ids
+                .iter()
+                .map(|id| libsql::Value::Text(id.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("purge transitions failed: {e}")))?;
+    }
 
     Ok(GatewayResponse::ok(Some(json!({
         "matched_count": matched,

@@ -8,7 +8,7 @@ PORT="${KONGODB_PORT:-18085}"
 SMOKE_ROOT="${KONGODB_SMOKE_ROOT:-./.smoke/fts-jobs}"
 DATA_DIR="${KONGODB_DATA_DIR:-${SMOKE_ROOT}/data}"
 LOG_FILE="${KONGODB_SMOKE_LOG:-${SMOKE_ROOT}/logs/smoke-fts-jobs.log}"
-BIN="${KONGODB_BIN:-./target/debug/kongodb}"
+BIN="${KONGODB_BIN:-./target/debug/kongo}"
 BASE_URL="http://127.0.0.1:${PORT}"
 BASE_PATH_RAW="${KONGODB_BASE_PATH:-}"
 BASE_PATH="/${BASE_PATH_RAW#/}"
@@ -109,7 +109,7 @@ assert_contains "$CFG1" '"key":"fts_enabled"' "system config should include fts_
 assert_contains "$CFG1" '"value":"0"' "fts_enabled should default to 0"
 
 echo "[6/10] search should fail while db fts flag is disabled"
-SEARCH_DISABLED="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"ftsdb","operation":"search","namespace":"docs","payload":{"search":"Hello"}}')"
+SEARCH_DISABLED="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"ftsdb","operation":"query","namespace":"docs","payload":{"search":"Hello"}}')"
 assert_contains "$SEARCH_DISABLED" 'search is disable: db_config.fts_enabled=false' "search disabled message should match"
 
 echo "[7/10] enable fts flag + queue reindex job"
@@ -123,7 +123,7 @@ REINDEX_DONE="$(poll_job_status "ftsdb" "$REINDEX_JOB_ID" "completed")"
 assert_contains "$REINDEX_DONE" '"job_type":"reindex_fts"' "get_job should return fts reindex job"
 
 echo "[8/10] search should succeed after reindex"
-SEARCH_OK="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"ftsdb","operation":"search","namespace":"docs","payload":{"search":"Hello"}}')"
+SEARCH_OK="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"ftsdb","operation":"query","namespace":"docs","payload":{"search":"Hello"}}')"
 assert_contains "$SEARCH_OK" '"status":"success"' "search should succeed after reindex"
 assert_contains "$SEARCH_OK" '"_id":"d1"' "search should return inserted doc"
 

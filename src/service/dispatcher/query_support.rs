@@ -861,6 +861,14 @@ fn remove_value_by_path(doc: &mut Value, path: &str) -> AppResult<()> {
 }
 
 fn build_order_by(sort: &Option<Value>) -> AppResult<String> {
+    build_order_by_for_context(sort, false)
+}
+
+fn build_search_order_by(sort: &Option<Value>) -> AppResult<String> {
+    build_order_by_for_context(sort, true)
+}
+
+fn build_order_by_for_context(sort: &Option<Value>, allow_search_score: bool) -> AppResult<String> {
     let Some(spec) = sort else {
         return Ok("_created_at DESC".to_string());
     };
@@ -878,7 +886,7 @@ fn build_order_by(sort: &Option<Value>) -> AppResult<String> {
                     return Err(AppError::BadRequest(format!("duplicate sort path: {key}")));
                 }
                 let direction = parse_sort_dir(dir)?;
-                let expr = sort_expr(path)?;
+                let expr = sort_expr(path, allow_search_score)?;
                 parts.push(format!("{expr} {direction}"));
             }
         }
@@ -887,7 +895,7 @@ fn build_order_by(sort: &Option<Value>) -> AppResult<String> {
                 if !seen.insert(path.clone()) {
                     return Err(AppError::BadRequest(format!("duplicate sort path: {path}")));
                 }
-                let expr = sort_expr(&path)?;
+                let expr = sort_expr(&path, allow_search_score)?;
                 parts.push(format!("{expr} {direction}"));
             }
         }
@@ -919,8 +927,12 @@ fn parse_sort_dir(v: &Value) -> AppResult<&'static str> {
     ))
 }
 
-fn sort_expr(path: &str) -> AppResult<String> {
+fn sort_expr(path: &str, allow_search_score: bool) -> AppResult<String> {
     match path {
+        "_search_score" if allow_search_score => Ok("_score".to_string()),
+        "_search_score" => Err(AppError::BadRequest(
+            "_search_score sort is only available when payload.search is used".to_string(),
+        )),
         "id" | "_id" => Ok("id".to_string()),
         "collection" | "_collection" => Ok("collection".to_string()),
         "_created_at" | "_modified_at" | "_expires_at" | "_size_bytes" | "_expiry_behavior"

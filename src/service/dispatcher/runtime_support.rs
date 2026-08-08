@@ -551,18 +551,16 @@ fn is_write_operation(operation: &str) -> bool {
             | "system_memory"
             | "get_sync_status"
             | "verify_db"
-            | "get"
             | "count"
-            | "search"
             | "aggregate"
             | "metrics_query"
             | "metrics_catalog"
             | "audit_query"
             | "user_get"
-            | "user_list"
+            | "user_query"
             | "user_get_details"
             | "file_get"
-            | "file_list"
+            | "file_query"
             | "query"
             | "list_indexes"
             | "list_backups"
@@ -574,8 +572,10 @@ fn is_write_operation(operation: &str) -> bool {
             | "query_db_stats"
             | "get_system_config"
             | "list_namespaces"
-            | "list_tables"
-            | "get_table_schema"
+            | "sql_list_tables"
+            | "sql_get_table_schema"
+            | "get_transition"
+            | "list_transitions"
     )
 }
 
@@ -626,7 +626,6 @@ fn supports_accepted_ack(operation: &str) -> bool {
             | "reindex_fts"
             | "drop_fts_index"
             | "enable_fts_index"
-            | "enable_ftx_index"
             | "continue_job"
             | "abort_job"
             | "list_jobs"
@@ -644,6 +643,10 @@ fn supports_accepted_ack(operation: &str) -> bool {
             | "file_create"
             | "file_update"
             | "file_delete"
+            | "schedule_transition"
+            | "cancel_transition"
+            | "retry_transition"
+            | "__run_document_transitions"
     )
 }
 
@@ -751,31 +754,6 @@ fn build_where_with_namespace_scope(
     Ok((where_clause, bind_values))
 }
 
-fn where_ids_with_namespace_scope(
-    binds: &mut Vec<libsql::Value>,
-    scope: &NamespaceReadScope,
-    ids: &[String],
-    id_placeholders: &str,
-) -> String {
-    match scope {
-        NamespaceReadScope::None | NamespaceReadScope::All => {
-            binds.extend(ids.iter().cloned().map(libsql::Value::Text));
-            format!("id IN ({id_placeholders})")
-        }
-        NamespaceReadScope::One(ns) => {
-            binds.push(libsql::Value::Text(ns.clone()));
-            binds.extend(ids.iter().cloned().map(libsql::Value::Text));
-            format!("collection = ? AND id IN ({id_placeholders})")
-        }
-        NamespaceReadScope::Many(list) => {
-            let ns_placeholders = vec!["?"; list.len()].join(", ");
-            binds.extend(list.iter().cloned().map(libsql::Value::Text));
-            binds.extend(ids.iter().cloned().map(libsql::Value::Text));
-            format!("collection IN ({ns_placeholders}) AND id IN ({id_placeholders})")
-        }
-    }
-}
-
 fn resolve_pagination_args(
     payload: &OperationPayload,
     default_limit: usize,
@@ -850,6 +828,33 @@ fn build_offsets(total_count: i64, count: usize, limit: i64, offset: i64) -> (Va
 }
 
 fn validate_accepted_preflight(req: &GatewayRequest) -> AppResult<()> {
+    let lifecycle = parse_document_lifecycle(req.payload.lifecycle.clone())?;
+    if !lifecycle.is_empty() {
+        match req.operation.as_str() {
+            "insert" if matches!(req.payload.data, Some(Value::Object(_))) => {}
+            "update"
+                if req.payload.filter.is_none()
+                    && matches!(req.payload.data, Some(Value::Object(_))) => {}
+            "upsert" if req.payload.max_docs.unwrap_or(1) == 1 => {}
+            "insert" => {
+                return Err(AppError::BadRequest(
+                    "lifecycle is only supported for a single-document insert".to_string(),
+                ));
+            }
+            "update" => {
+                return Err(AppError::BadRequest(
+                    "lifecycle is only supported for update with one data object containing _id"
+                        .to_string(),
+                ));
+            }
+            "upsert" => {
+                return Err(AppError::BadRequest(
+                    "upsert with lifecycle requires max_docs=1".to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
     match req.operation.as_str() {
         "insert" => {
             let data = req
@@ -873,18 +878,12 @@ fn validate_accepted_preflight(req: &GatewayRequest) -> AppResult<()> {
                 ));
             }
         }
-        "update" | "set" => {
+        "update" => {
             let data = req
                 .payload
                 .data
                 .as_ref()
                 .ok_or_else(|| AppError::BadRequest("data is required".to_string()))?;
-            if req.operation == "set" {
-                if !data.is_object() {
-                    return Err(AppError::BadRequest("data must be an object".to_string()));
-                }
-                return Ok(());
-            }
             if data.is_object() {
             } else if let Some(arr) = data.as_array() {
                 if arr.is_empty() {
@@ -995,7 +994,7 @@ fn prepare_accepted_ack_preview(req: &mut GatewayRequest) -> AppResult<Value> {
                 ));
             }
         }
-        "update" | "set" => {
+        "update" => {
             if let Some(obj) = req.payload.data.as_ref().and_then(|v| v.as_object()) {
                 if let Some(id) = obj
                     .get("_id")

@@ -57,14 +57,16 @@ async fn list_commands() -> AppResult<GatewayResponse> {
         "system_memory",
         "cleanup_temp_artifacts",
         "insert",
+        "schedule_transition",
+        "cancel_transition",
+        "get_transition",
+        "list_transitions",
+        "retry_transition",
         "update",
-        "set",
         "upsert",
-        "get",
         "count",
         "query",
         "aggregate",
-        "search",
         "metrics_ingest",
         "metrics_query",
         "metrics_catalog",
@@ -72,7 +74,7 @@ async fn list_commands() -> AppResult<GatewayResponse> {
         "audit_query",
         "user_create",
         "user_get",
-        "user_list",
+        "user_query",
         "user_get_details",
         "user_update",
         "user_update_status",
@@ -82,7 +84,7 @@ async fn list_commands() -> AppResult<GatewayResponse> {
         "user_unlink_provider",
         "file_create",
         "file_get",
-        "file_list",
+        "file_query",
         "file_update",
         "file_delete",
         "sql_execute",
@@ -100,8 +102,8 @@ async fn list_commands() -> AppResult<GatewayResponse> {
         "get_system_config",
         "recompute_stats",
         "list_namespaces",
-        "list_tables",
-        "get_table_schema",
+        "sql_list_tables",
+        "sql_get_table_schema",
         "load_db",
         "sync_db",
         "create_snapshot",
@@ -537,7 +539,7 @@ async fn list_index_op(conn: &libsql::Connection) -> AppResult<GatewayResponse> 
     }))))
 }
 
-async fn list_tables(conn: &libsql::Connection) -> AppResult<GatewayResponse> {
+async fn sql_list_tables(conn: &libsql::Connection) -> AppResult<GatewayResponse> {
     let mut rows = conn
         .query(
             "SELECT name
@@ -549,17 +551,17 @@ async fn list_tables(conn: &libsql::Connection) -> AppResult<GatewayResponse> {
             (),
         )
         .await
-        .map_err(|e| AppError::Internal(format!("list_tables failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("sql_list_tables failed: {e}")))?;
 
     let mut items = Vec::<Value>::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("list_tables row read failed: {e}")))?
+        .map_err(|e| AppError::Internal(format!("sql_list_tables row read failed: {e}")))?
     {
         let name: String = row
             .get(0)
-            .map_err(|e| AppError::Internal(format!("list_tables decode failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("sql_list_tables decode failed: {e}")))?;
         items.push(json!({ "name": name }));
     }
 
@@ -569,7 +571,7 @@ async fn list_tables(conn: &libsql::Connection) -> AppResult<GatewayResponse> {
     }))))
 }
 
-async fn get_table_schema(
+async fn sql_get_table_schema(
     conn: &libsql::Connection,
     req: GatewayRequest,
 ) -> AppResult<GatewayResponse> {
@@ -582,7 +584,7 @@ async fn get_table_schema(
         .ok_or_else(|| AppError::BadRequest("table is required".to_string()))?;
     if table.starts_with("__kdb_") || table.starts_with("sqlite_") {
         return Err(AppError::BadRequest(
-            "get_table_schema cannot inspect reserved internal tables".to_string(),
+            "sql_get_table_schema cannot inspect reserved internal tables".to_string(),
         ));
     }
 
@@ -598,11 +600,11 @@ async fn get_table_schema(
             libsql::params![table.clone()],
         )
         .await
-        .map_err(|e| AppError::Internal(format!("get_table_schema lookup failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("sql_get_table_schema lookup failed: {e}")))?;
     if exists_rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("get_table_schema lookup row read failed: {e}")))?
+        .map_err(|e| AppError::Internal(format!("sql_get_table_schema lookup row read failed: {e}")))?
         .is_none()
     {
         return Err(AppError::BadRequest(format!("table not found: {table}")));
@@ -612,32 +614,32 @@ async fn get_table_schema(
     let mut rows = conn
         .query(&sql, ())
         .await
-        .map_err(|e| AppError::Internal(format!("get_table_schema failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("sql_get_table_schema failed: {e}")))?;
     let mut columns = Vec::<Value>::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("get_table_schema row read failed: {e}")))?
+        .map_err(|e| AppError::Internal(format!("sql_get_table_schema row read failed: {e}")))?
     {
         let cid: i64 = row
             .get(0)
-            .map_err(|e| AppError::Internal(format!("get_table_schema cid decode failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("sql_get_table_schema cid decode failed: {e}")))?;
         let name: String = row
             .get(1)
-            .map_err(|e| AppError::Internal(format!("get_table_schema name decode failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("sql_get_table_schema name decode failed: {e}")))?;
         let data_type: String = row
             .get(2)
-            .map_err(|e| AppError::Internal(format!("get_table_schema type decode failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("sql_get_table_schema type decode failed: {e}")))?;
         let notnull: i64 = row
             .get(3)
-            .map_err(|e| AppError::Internal(format!("get_table_schema notnull decode failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("sql_get_table_schema notnull decode failed: {e}")))?;
         let default_value = row
             .get_value(4)
             .map(libsql_value_to_json)
-            .map_err(|e| AppError::Internal(format!("get_table_schema default decode failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("sql_get_table_schema default decode failed: {e}")))?;
         let pk: i64 = row
             .get(5)
-            .map_err(|e| AppError::Internal(format!("get_table_schema pk decode failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("sql_get_table_schema pk decode failed: {e}")))?;
         columns.push(json!({
             "cid": cid,
             "name": name,
@@ -1235,6 +1237,19 @@ async fn change_namespace(
         .await
         .map_err(|e| AppError::Internal(format!("change_namespace update failed: {e}")))?;
 
+    let mut transition_binds = vec![libsql::Value::Text(to_namespace.clone())];
+    transition_binds.extend(ids.iter().map(|id| libsql::Value::Text(id.clone())));
+    tx.execute(
+        &format!(
+            "UPDATE __kdb_document_transitions SET collection = ?,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE document_id IN ({placeholders})"
+        ),
+        transition_binds,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("change_namespace transitions failed: {e}")))?;
+
     tx.execute(
         "UPDATE __kdb_system_stats
          SET total_count = total_count - ?, total_bytes = total_bytes - ?
@@ -1339,6 +1354,13 @@ async fn rename_namespace(
         )
         .await
         .map_err(|e| AppError::Internal(format!("rename_namespace __kdb_archive update failed: {e}")))?;
+    tx.execute(
+        "UPDATE __kdb_document_transitions SET collection = ?,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE collection = ?",
+        libsql::params![to_namespace.clone(), from_namespace.clone()],
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("rename_namespace transitions failed: {e}")))?;
     tx.commit()
         .await
         .map_err(|e| AppError::Internal(format!("rename_namespace tx commit failed: {e}")))?;
@@ -1403,6 +1425,8 @@ async fn reap_db(
         state.metric_events_retention_days,
     )
     .await?;
+    let transition_response = process_due_document_transitions(state, db_path, conn).await?;
+    let transition_data = transition_response.data.unwrap_or_else(|| json!({}));
     if stats.has_changes() {
         state
             .db_manager
@@ -1426,7 +1450,8 @@ async fn reap_db(
         "deleted_from_archive": stats.deleted_from_archive,
         "deleted_metric_events": stats.deleted_metric_events,
         "transitioned_identity_statuses": stats.transitioned_identity_statuses,
-        "deleted_identity_tokens": stats.deleted_identity_tokens
+        "deleted_identity_tokens": stats.deleted_identity_tokens,
+        "document_transitions": transition_data
     }))))
 }
 

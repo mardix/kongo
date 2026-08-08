@@ -213,6 +213,9 @@ async fn query(
     req: GatewayRequest,
 ) -> AppResult<GatewayResponse> {
     let payload = req.payload;
+    if payload.search.is_some() {
+        return query_fts(state, db_path, conn, payload).await;
+    }
     let namespace_scope = resolve_read_namespace_scope(&payload, true)?;
     let include_namespace = payload
         .include_namespace
@@ -222,13 +225,21 @@ async fn query(
     if !observed_paths.is_empty() {
         let _ = bump_query_heatmap(conn, &observed_paths).await;
     }
-    let cache_meta = cache_key_for_read(state, db_path, "query", &payload)?;
+    let source = resolve_source(&payload);
+    let explicit_ids = explicit_ids_from_query_filter(payload.filter.as_ref())?;
+    let allow_pending = explicit_ids.is_some()
+        && !payload.force_db.unwrap_or(false)
+        && source == "__kdb_documents";
+    let cache_meta = if allow_pending {
+        None
+    } else {
+        cache_key_for_read(state, db_path, "query", &payload)?
+    };
     if let Some(meta) = cache_meta.as_ref() {
         if let Some(cached) = get_cached_read(state, meta).await {
             return Ok(GatewayResponse::ok(Some(cached)));
         }
     }
-    let source = resolve_source(&payload);
     let (mut where_clause, mut bind_values) = build_where_with_namespace_scope(
         payload.filter.clone().unwrap_or_else(|| json!({})),
         &namespace_scope,
@@ -247,7 +258,7 @@ async fn query(
         }))));
     }
 
-    let total_count = execute_count(conn, source, &where_clause, bind_values.clone()).await?;
+    let mut total_count = execute_count(conn, source, &where_clause, bind_values.clone()).await?;
 
     let (limit, offset, page) = resolve_pagination_args(&payload, state.query_default_limit)?;
     let order_by = build_order_by(&payload.sort)?;
@@ -313,6 +324,39 @@ async fn query(
         out.push(value);
     }
 
+    if allow_pending {
+        let mut pending = HashMap::<String, Value>::new();
+        for id in explicit_ids.as_ref().expect("allow_pending requires explicit ids") {
+            if let Some(candidate) = state.get_pending_document(db_path, id) {
+                if pending_matches_read_scope(&candidate.collection, &namespace_scope) {
+                    let mut item = candidate.document;
+                    if include_namespace {
+                        if let (Some(obj), Some(ns)) =
+                            (item.as_object_mut(), candidate.collection.as_ref())
+                        {
+                            obj.insert("_namespace".to_string(), Value::String(ns.clone()));
+                        }
+                    }
+                    pending.insert(id.clone(), item);
+                }
+            }
+        }
+
+        for item in &mut out {
+            if let Some(id) = item.get("_id").and_then(Value::as_str) {
+                if let Some(replacement) = pending.remove(id) {
+                    *item = replacement;
+                }
+            }
+        }
+        if offset == 0 && out.len() < limit as usize {
+            let available = limit as usize - out.len();
+            let added = pending.len().min(available);
+            out.extend(pending.into_values().take(available));
+            total_count += added as i64;
+        }
+    }
+
     if let Some(lookups) = payload.lookups.as_ref() {
         let max_depth = resolve_lookup_max_depth(state, payload.lookup_depth_override)?;
         let mut roots = out.clone();
@@ -358,18 +402,64 @@ async fn query(
     Ok(GatewayResponse::ok(Some(data)))
 }
 
-async fn search(
+fn explicit_ids_from_query_filter(filter: Option<&Value>) -> AppResult<Option<Vec<String>>> {
+    let Some(filter) = filter else {
+        return Ok(None);
+    };
+    let Some(obj) = filter.as_object() else {
+        return Ok(None);
+    };
+    if obj.len() != 1 {
+        return Ok(None);
+    }
+    let Some(value) = obj.get("_id") else {
+        return Ok(None);
+    };
+    let raw_ids = match value {
+        Value::String(id) => vec![id.clone()],
+        Value::Object(op) if op.len() == 1 => match op.iter().next() {
+            Some((name, Value::String(id))) if name == "$eq" => vec![id.clone()],
+            Some((name, Value::Array(ids))) if name == "$in" => ids
+                .iter()
+                .map(|id| {
+                    id.as_str().map(str::to_string).ok_or_else(|| {
+                        AppError::BadRequest(
+                            "query filter _id.$in items must be strings".to_string(),
+                        )
+                    })
+                })
+                .collect::<AppResult<Vec<_>>>()?,
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let mut seen = HashSet::new();
+    let mut ids = Vec::with_capacity(raw_ids.len());
+    for id in raw_ids {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(AppError::BadRequest(
+                "query filter _id values must be non-empty strings".to_string(),
+            ));
+        }
+        if seen.insert(id.to_string()) {
+            ids.push(id.to_string());
+        }
+    }
+    Ok(Some(ids))
+}
+
+async fn query_fts(
     state: &AppState,
     db_path: &str,
     conn: &libsql::Connection,
-    req: GatewayRequest,
+    payload: OperationPayload,
 ) -> AppResult<GatewayResponse> {
     if !get_bool_config(conn, "fts_enabled").await?.unwrap_or(true) {
         return Err(AppError::BadRequest(
             "search is disable: db_config.fts_enabled=false".to_string(),
         ));
     }
-    let payload = req.payload;
     let namespace_scope = resolve_read_namespace_scope(&payload, true)?;
     let include_namespace = payload
         .include_namespace
@@ -377,7 +467,7 @@ async fn search(
         || namespace_scope_force_include(&namespace_scope);
     if payload.include_archive.unwrap_or(false) || payload.archive_only.unwrap_or(false) {
         return Err(AppError::BadRequest(
-            "search currently supports live documents only".to_string(),
+            "full-text query supports live documents only".to_string(),
         ));
     }
 
@@ -386,13 +476,13 @@ async fn search(
         .clone()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::BadRequest("search query is required".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("payload.search must be non-empty".to_string()))?;
 
     let observed_paths = observed_query_paths(&payload);
     if !observed_paths.is_empty() {
         let _ = bump_query_heatmap(conn, &observed_paths).await;
     }
-    let cache_meta = cache_key_for_read(state, db_path, "search", &payload)?;
+    let cache_meta = cache_key_for_read(state, db_path, "query", &payload)?;
     if let Some(meta) = cache_meta.as_ref() {
         if let Some(cached) = get_cached_read(state, meta).await {
             return Ok(GatewayResponse::ok(Some(cached)));
@@ -436,7 +526,7 @@ async fn search(
 
     let (limit, offset, page) = resolve_pagination_args(&payload, state.query_default_limit)?;
     let order_by = if payload.sort.is_some() {
-        build_order_by(&payload.sort)?
+        build_search_order_by(&payload.sort)?
     } else {
         "_score ASC, _created_at DESC".to_string()
     };
@@ -578,6 +668,10 @@ async fn search(
         roots.clear();
     }
 
+    if let Some(spec) = payload.compute.as_ref() {
+        apply_row_compute_to_items(&mut out, spec)?;
+    }
+
     if payload.fields.is_some() || payload.exclude_fields.is_some() {
         let mut projected = Vec::<Value>::with_capacity(out.len());
         for item in &out {
@@ -602,159 +696,6 @@ async fn search(
         "prev_offset": prev_offset,
         "pagination": pagination
     });
-    attach_users_if_requested(conn, &mut data, &payload).await?;
-    if let Some(meta) = cache_meta {
-        put_cached_read(state, &meta, data.clone()).await;
-    }
-    Ok(GatewayResponse::ok(Some(data)))
-}
-
-
-// Additional read handlers extracted from dispatcher.rs.
-
-async fn get(
-    state: &AppState,
-    db_path: &str,
-    conn: &libsql::Connection,
-    req: GatewayRequest,
-) -> AppResult<GatewayResponse> {
-    let payload = req.payload;
-    let namespace_scope = resolve_read_namespace_scope(&payload, false)?;
-    let include_namespace = payload
-        .include_namespace
-        .unwrap_or(state.response_include_namespace)
-        || namespace_scope_force_include(&namespace_scope);
-    let ids = extract_ids_or_single_strict(&payload)?;
-    let source = resolve_source(&payload);
-    let allow_pending = !payload.force_db.unwrap_or(false) && source == "__kdb_documents";
-    let mut items = Vec::<Value>::new();
-    let mut missing_ids = Vec::<String>::new();
-    if allow_pending {
-        for id in &ids {
-            if let Some(pending) = state.get_pending_document(db_path, id) {
-                if pending_matches_read_scope(&pending.collection, &namespace_scope) {
-                    let mut item = pending.document.clone();
-                    if include_namespace {
-                        if let (Some(obj), Some(ns)) =
-                            (item.as_object_mut(), pending.collection.as_ref())
-                        {
-                            obj.insert("_namespace".to_string(), Value::String(ns.clone()));
-                        }
-                    }
-                    items.push(item);
-                    continue;
-                }
-            }
-            missing_ids.push(id.clone());
-        }
-    } else {
-        missing_ids = ids.clone();
-    }
-
-    let cache_meta = if allow_pending || payload.force_db.unwrap_or(false) {
-        None
-    } else {
-        cache_key_for_read(state, db_path, "get", &payload)?
-    };
-    if let Some(meta) = cache_meta.as_ref() {
-        if let Some(cached) = get_cached_read(state, meta).await {
-            return Ok(GatewayResponse::ok(Some(cached)));
-        }
-    }
-    if !missing_ids.is_empty() {
-        let placeholders = vec!["?"; missing_ids.len()].join(", ");
-        let mut binds = Vec::<libsql::Value>::new();
-        let mut where_clause = where_ids_with_namespace_scope(
-            &mut binds,
-            &namespace_scope,
-            &missing_ids,
-            &placeholders,
-        );
-        apply_document_user_scope(
-            &mut where_clause,
-            &mut binds,
-            clean_optional(payload.document_user_id.clone()),
-        );
-
-        let mut rows = conn
-            .query(
-                &if state.response_include_system_timestamps && include_namespace {
-                    format!(
-                        "SELECT json(data), _user_id, collection, _created_at, _modified_at FROM {source} WHERE {where_clause} ORDER BY _created_at DESC"
-                    )
-                } else if state.response_include_system_timestamps {
-                    format!(
-                        "SELECT json(data), _user_id, _created_at, _modified_at FROM {source} WHERE {where_clause} ORDER BY _created_at DESC"
-                    )
-                } else if include_namespace {
-                    format!("SELECT json(data), _user_id, collection FROM {source} WHERE {where_clause} ORDER BY _created_at DESC")
-                } else {
-                    format!("SELECT json(data), _user_id FROM {source} WHERE {where_clause} ORDER BY _created_at DESC")
-                },
-                binds,
-            )
-            .await
-            .map_err(|e| AppError::Internal(format!("get query failed: {e}")))?;
-
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| AppError::Internal(format!("get row read failed: {e}")))?
-        {
-            let raw: String = row
-                .get(0)
-                .map_err(|e| AppError::Internal(format!("get row decode failed: {e}")))?;
-            let mut item = serde_json::from_str::<Value>(&raw)
-                .map_err(|e| AppError::Internal(format!("get json decode failed: {e}")))?;
-            let user_id: Option<String> = row
-                .get(1)
-                .map_err(|e| AppError::Internal(format!("get _user_id decode failed: {e}")))?;
-            attach_document_user_id(&mut item, user_id);
-            let mut idx = 2;
-            if include_namespace {
-                let ns: String = row
-                    .get(idx)
-                    .map_err(|e| AppError::Internal(format!("get namespace decode failed: {e}")))?;
-                if let Some(obj) = item.as_object_mut() {
-                    obj.insert("_namespace".to_string(), Value::String(ns));
-                }
-                idx += 1;
-            }
-            if state.response_include_system_timestamps {
-                let created_at: Option<String> = row.get(idx).map_err(|e| {
-                    AppError::Internal(format!("get created_at decode failed: {e}"))
-                })?;
-                let modified_at: Option<String> = row.get(idx + 1).map_err(|e| {
-                    AppError::Internal(format!("get modified_at decode failed: {e}"))
-                })?;
-                attach_system_timestamps(&mut item, created_at, modified_at);
-            }
-            items.push(item);
-        }
-    }
-
-    if let Some(lookups) = payload.lookups.as_ref() {
-        let max_depth = resolve_lookup_max_depth(state, payload.lookup_depth_override)?;
-        let mut roots = items.clone();
-        execute_lookup_scope(
-            state, conn, &mut items, &mut roots, None, lookups, 1, max_depth,
-        )
-        .await?;
-        roots.clear();
-    }
-
-    if payload.fields.is_some() || payload.exclude_fields.is_some() {
-        let mut projected = Vec::<Value>::with_capacity(items.len());
-        for item in &items {
-            projected.push(apply_projection(
-                item,
-                &payload.fields,
-                &payload.exclude_fields,
-            )?);
-        }
-        items = projected;
-    }
-    let mut data = json!({ "items": items, "count": items.len() });
     attach_users_if_requested(conn, &mut data, &payload).await?;
     if let Some(meta) = cache_meta {
         put_cached_read(state, &meta, data.clone()).await;

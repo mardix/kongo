@@ -75,6 +75,20 @@ pub async fn reap_conn(
         .map_err(|e| AppError::Internal(format!("reaper __kdb_archive move failed: {e}")))?;
 
     tx.execute(
+        "UPDATE __kdb_document_transitions
+         SET status='cancelled', completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE status='pending' AND document_id IN (
+             SELECT id FROM __kdb_documents
+             WHERE _expires_at IS NOT NULL AND _expires_at <= ?
+               AND lower(coalesce(_expiry_behavior, 'archive')) <> 'delete'
+         )",
+        libsql::params![now],
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("reaper transition cancellation failed: {e}")))?;
+
+    tx.execute(
         "DELETE FROM __kdb_documents
          WHERE _expires_at IS NOT NULL
            AND _expires_at <= ?
@@ -83,6 +97,17 @@ pub async fn reap_conn(
     )
     .await
     .map_err(|e| AppError::Internal(format!("reaper live __kdb_archive-delete failed: {e}")))?;
+
+    tx.execute(
+        "DELETE FROM __kdb_document_transitions WHERE document_id IN (
+             SELECT id FROM __kdb_documents
+             WHERE _expires_at IS NOT NULL AND _expires_at <= ?
+               AND lower(coalesce(_expiry_behavior, 'archive')) = 'delete'
+         )",
+        libsql::params![now],
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("reaper hard-delete transitions failed: {e}")))?;
 
     let deleted_live_documents = tx
         .execute(

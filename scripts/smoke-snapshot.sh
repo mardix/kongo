@@ -89,8 +89,8 @@ if [[ -z "$SNAP_ID" ]]; then
 fi
 
 echo "[5/7] mutate data then create second snapshot" | tee -a "$LOG_FILE"
-SET1="$(api_post "{\"db\":\"$DB\",\"operation\":\"set\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"_id\":\"seed-fixed\",\"state\":\"after-snap-1\"}}}")"
-assert_contains "$SET1" '"status":"success"' "set should succeed"
+SET1="$(api_post "{\"db\":\"$DB\",\"operation\":\"update\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"_id\":\"seed-fixed\",\"state\":\"after-snap-1\"}}}")"
+assert_contains "$SET1" '"status":"success"' "update should succeed"
 SNAP2="$(api_post "{\"db\":\"$DB\",\"operation\":\"sync_db\",\"payload\":{}}")"
 assert_contains "$SNAP2" '"status":"success"' "sync_db should succeed"
 

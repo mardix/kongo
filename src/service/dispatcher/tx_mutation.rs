@@ -132,6 +132,7 @@ async fn transaction(
 
 async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<()> {
     let collection = require_collection(payload)?;
+    let lifecycle_specs = parse_document_lifecycle(payload.lifecycle.clone())?;
     let mut doc = require_object(payload.data.clone(), "data")?;
     expand_kdb_macros_in_value(&mut doc)?;
     let allow_system_timestamps = payload.allow_system_timestamps.unwrap_or(false);
@@ -149,8 +150,8 @@ async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
              VALUES (?, ?, {data_expr}, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
         ),
         libsql::params![
-            id,
-            collection,
+            id.clone(),
+            collection.clone(),
             data,
             size,
             expires_at,
@@ -161,11 +162,15 @@ async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
     )
     .await
     .map_err(|e| AppError::Conflict(format!("transaction insert failed: {e}")))?;
+    for spec in &lifecycle_specs {
+        upsert_transition_on_tx(tx, &id, &collection, spec).await?;
+    }
     Ok(())
 }
 
 async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<()> {
     let collection = require_collection(payload)?;
+    let lifecycle_specs = parse_document_lifecycle(payload.lifecycle.clone())?;
     let mut data = require_object(payload.data.clone(), "data")?;
     expand_kdb_macros_in_value(&mut data)?;
     let id = data
@@ -231,10 +236,30 @@ async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
                      _modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                  WHERE collection = ? AND id = ?"
             ),
-            libsql::params![patch.clone(), patch, collection, id],
+            libsql::params![patch.clone(), patch, collection.clone(), id.clone()],
         )
         .await
         .map_err(|e| AppError::Internal(format!("transaction update failed: {e}")))?;
+    }
+    if !lifecycle_specs.is_empty() {
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM __kdb_documents WHERE collection = ? AND id = ? LIMIT 1",
+                libsql::params![collection.clone(), id.clone()],
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("transaction lifecycle target failed: {e}")))?;
+        let exists = rows
+            .next()
+            .await
+            .map_err(|e| AppError::Internal(format!("transaction lifecycle row failed: {e}")))?
+            .is_some();
+        drop(rows);
+        if exists {
+            for spec in &lifecycle_specs {
+                upsert_transition_on_tx(tx, &id, &collection, spec).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -245,15 +270,19 @@ async fn tx_delete(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
     let txn_id = Uuid::new_v4().simple().to_string();
     let mut insert_binds = vec![libsql::Value::Text(txn_id), libsql::Value::Null];
     let mut delete_binds = Vec::<libsql::Value>::new();
+    let mut transition_binds = Vec::<libsql::Value>::new();
     let where_clause = if let Some(collection) = collection {
         insert_binds.push(libsql::Value::Text(collection.clone()));
         insert_binds.push(libsql::Value::Text(id.clone()));
-        delete_binds.push(libsql::Value::Text(collection));
-        delete_binds.push(libsql::Value::Text(id));
+        delete_binds.push(libsql::Value::Text(collection.clone()));
+        delete_binds.push(libsql::Value::Text(id.clone()));
+        transition_binds.push(libsql::Value::Text(collection.clone()));
+        transition_binds.push(libsql::Value::Text(id.clone()));
         "collection = ? AND id = ?".to_string()
     } else {
         insert_binds.push(libsql::Value::Text(id.clone()));
-        delete_binds.push(libsql::Value::Text(id));
+        delete_binds.push(libsql::Value::Text(id.clone()));
+        transition_binds.push(libsql::Value::Text(id.clone()));
         "id = ?".to_string()
     };
 
@@ -268,6 +297,18 @@ async fn tx_delete(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
     )
     .await
     .map_err(|e| AppError::Internal(format!("transaction delete __kdb_archive failed: {e}")))?;
+
+    tx.execute(
+        &format!("UPDATE __kdb_document_transitions
+         SET status='cancelled', completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+             updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE document_id IN (
+             SELECT id FROM __kdb_documents WHERE {where_clause}
+         ) AND status='pending'"),
+        transition_binds,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("transaction transition cancel failed: {e}")))?;
 
     tx.execute(
         &format!("DELETE FROM __kdb_documents WHERE {}", where_clause),
@@ -307,10 +348,12 @@ async fn __kdb_archive_and_delete_ids(
         to_sql_nullable_int(__kdb_archive_expires_at),
     ];
     let mut delete_binds: Vec<libsql::Value> = Vec::new();
+    let mut transition_binds: Vec<libsql::Value> = Vec::new();
 
     let where_clause = if let Some(collection) = collection {
         insert_binds.push(libsql::Value::Text(collection.to_string()));
         delete_binds.push(libsql::Value::Text(collection.to_string()));
+        transition_binds.push(libsql::Value::Text(collection.to_string()));
         format!("collection = ? AND id IN ({})", placeholders)
     } else {
         format!("id IN ({})", placeholders)
@@ -318,6 +361,7 @@ async fn __kdb_archive_and_delete_ids(
 
     insert_binds.extend(ids.iter().map(|id| libsql::Value::Text(id.clone())));
     delete_binds.extend(ids.iter().map(|id| libsql::Value::Text(id.clone())));
+    transition_binds.extend(ids.iter().map(|id| libsql::Value::Text(id.clone())));
 
     let tx = conn
         .transaction()
@@ -336,6 +380,20 @@ async fn __kdb_archive_and_delete_ids(
     )
     .await
     .map_err(|e| AppError::Internal(format!("__kdb_archive insert failed: {e}")))?;
+
+    tx.execute(
+        &format!(
+            "UPDATE __kdb_document_transitions
+             SET status='cancelled', completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                 updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE document_id IN (
+                 SELECT id FROM __kdb_documents WHERE {where_clause}
+             ) AND status='pending'"
+        ),
+        transition_binds,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("delete transition cancellation failed: {e}")))?;
 
     let deleted = tx
         .execute(
@@ -1762,314 +1820,6 @@ fn apply_max_docs_to_ids(mut ids: Vec<String>, max_docs: Option<i64>) -> AppResu
     Ok(ids)
 }
 
-fn normalize_request_legacy_aliases(
-    operation: &str,
-    req: &mut GatewayRequest,
-    state: &AppState,
-) -> AppResult<()> {
-    let import_aliases = state.legacy_import_pk_aliases.as_ref();
-    if import_aliases.is_empty() {
-        return Ok(());
-    }
-
-    // Write payload aliases (_key -> _id style).
-    if is_write_operation(operation) {
-        apply_import_aliases_to_data_opt(&mut req.payload.data, import_aliases)?;
-        apply_import_aliases_to_data_opt(&mut req.payload.insert_data, import_aliases)?;
-        apply_import_aliases_to_data_opt(&mut req.payload.update_data, import_aliases)?;
-    }
-
-    // Query/input path aliases.
-    if let Some(filter) = req.payload.filter.as_mut() {
-        normalize_filter_aliases(filter, import_aliases)?;
-    }
-    if let Some(sort) = req.payload.sort.as_mut() {
-        normalize_sort_aliases(sort, import_aliases)?;
-    }
-    if let Some(fields) = req.payload.fields.as_mut() {
-        normalize_paths_aliases(fields, import_aliases);
-    }
-    if let Some(exclude_fields) = req.payload.exclude_fields.as_mut() {
-        normalize_paths_aliases(exclude_fields, import_aliases);
-    }
-    if let Some(compute) = req.payload.compute.as_mut() {
-        normalize_aggregate_aliases(compute, import_aliases)?;
-    }
-    if let Some(lookups) = req.payload.lookups.as_mut() {
-        normalize_lookup_aliases(lookups, import_aliases)?;
-    }
-
-    if req.operation == "transaction" {
-        if let Some(children) = req.data.as_mut() {
-            for child in children {
-                let op_name = child.operation.clone();
-                normalize_request_legacy_aliases(op_name.as_str(), child, state)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn apply_import_aliases_to_data_opt(
-    value: &mut Option<Value>,
-    aliases: &[(String, String)],
-) -> AppResult<()> {
-    let Some(value) = value.as_mut() else {
-        return Ok(());
-    };
-    match value {
-        Value::Object(_) => normalize_doc_pk_aliases(value, aliases),
-        Value::Array(items) => {
-            for item in items {
-                normalize_doc_pk_aliases(item, aliases)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn normalize_doc_pk_aliases(value: &mut Value, aliases: &[(String, String)]) -> AppResult<()> {
-    let obj = value
-        .as_object_mut()
-        .ok_or_else(|| AppError::BadRequest("data items must be objects".to_string()))?;
-    for (from, to) in aliases {
-        if from == to {
-            continue;
-        }
-        if obj.contains_key(from) {
-            if !obj.contains_key(to) {
-                if let Some(v) = obj.get(from).cloned() {
-                    obj.insert(to.clone(), v);
-                }
-            }
-            obj.remove(from);
-        }
-    }
-    Ok(())
-}
-
-fn normalize_filter_aliases(filter: &mut Value, aliases: &[(String, String)]) -> AppResult<()> {
-    match filter {
-        Value::Object(obj) => {
-            let mut out = serde_json::Map::new();
-            let old = std::mem::take(obj);
-            for (key, mut value) in old {
-                normalize_filter_aliases(&mut value, aliases)?;
-                if key.starts_with('$') {
-                    out.insert(key, value);
-                    continue;
-                }
-                let mapped = map_path_alias(&key, aliases);
-                if out.contains_key(&mapped) {
-                    continue;
-                }
-                out.insert(mapped, value);
-            }
-            *obj = out;
-            Ok(())
-        }
-        Value::Array(items) => {
-            for item in items {
-                normalize_filter_aliases(item, aliases)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn normalize_sort_aliases(sort: &mut Value, aliases: &[(String, String)]) -> AppResult<()> {
-    match sort {
-        Value::Object(obj) => {
-            let mut out = serde_json::Map::new();
-            let old = std::mem::take(obj);
-            for (key, value) in old {
-                let mapped = map_path_alias(&key, aliases);
-                if out.contains_key(&mapped) {
-                    continue;
-                }
-                out.insert(mapped, value);
-            }
-            *obj = out;
-            Ok(())
-        }
-        Value::String(s) => {
-            let mut tokens = Vec::new();
-            for raw in s.split(',') {
-                let token = raw.trim();
-                if token.is_empty() {
-                    continue;
-                }
-                let mut parts = token.split_whitespace();
-                let Some(path) = parts.next() else {
-                    continue;
-                };
-                let mapped = map_path_alias(path, aliases);
-                let dir = parts.next().map(str::to_string);
-                let token = if let Some(dir) = dir {
-                    format!("{mapped} {dir}")
-                } else {
-                    mapped
-                };
-                tokens.push(token);
-            }
-            *s = tokens.join(", ");
-            Ok(())
-        }
-        _ => Err(AppError::BadRequest(
-            "sort must be an object or string".to_string(),
-        )),
-    }
-}
-
-fn normalize_paths_aliases(paths: &mut Vec<String>, aliases: &[(String, String)]) {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for path in paths.iter() {
-        let mapped = map_path_alias(path, aliases);
-        if seen.insert(mapped.clone()) {
-            out.push(mapped);
-        }
-    }
-    *paths = out;
-}
-
-fn normalize_aggregate_aliases(
-    aggregate: &mut Value,
-    aliases: &[(String, String)],
-) -> AppResult<()> {
-    let obj = aggregate
-        .as_object_mut()
-        .ok_or_else(|| AppError::BadRequest("aggregate must be an object".to_string()))?;
-    for def in obj.values_mut() {
-        let Some(spec) = def.as_object_mut() else {
-            continue;
-        };
-        let mut op_key: Option<String> = None;
-        for k in spec.keys() {
-            if k.starts_with('$') && !matches!(k.as_str(), "$distinct" | "$filter") {
-                op_key = Some(k.clone());
-                break;
-            }
-        }
-        if let Some(op) = op_key {
-            if let Some(arg) = spec.get_mut(&op) {
-                if let Some(path) = arg.as_str() {
-                    if !(op == "$count" && path == "*") {
-                        *arg = Value::String(map_path_alias(path, aliases));
-                    }
-                }
-            }
-        }
-        if let Some(filter) = spec.get_mut("$filter") {
-            normalize_filter_aliases(filter, aliases)?;
-        }
-    }
-    Ok(())
-}
-
-fn normalize_lookup_aliases(lookups: &mut Value, aliases: &[(String, String)]) -> AppResult<()> {
-    let obj = lookups
-        .as_object_mut()
-        .ok_or_else(|| AppError::BadRequest("lookups must be an object map".to_string()))?;
-    for spec in obj.values_mut() {
-        let spec_obj = spec
-            .as_object_mut()
-            .ok_or_else(|| AppError::BadRequest("lookup spec must be object".to_string()))?;
-        if let Some(v) = spec_obj
-            .get("local_field")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        {
-            spec_obj.insert(
-                "local_field".to_string(),
-                Value::String(map_path_alias(&v, aliases)),
-            );
-        }
-        if let Some(v) = spec_obj
-            .get("foreign_field")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        {
-            spec_obj.insert(
-                "foreign_field".to_string(),
-                Value::String(map_path_alias(&v, aliases)),
-            );
-        }
-        if let Some(filter) = spec_obj.get_mut("filter") {
-            normalize_filter_aliases(filter, aliases)?;
-        }
-        if let Some(sort) = spec_obj.get_mut("sort") {
-            normalize_sort_aliases(sort, aliases)?;
-        }
-        if let Some(fields) = spec_obj.get_mut("fields") {
-            let arr = fields
-                .as_array()
-                .ok_or_else(|| AppError::BadRequest("lookup fields must be array".to_string()))?;
-            let mut mapped = Vec::new();
-            for item in arr {
-                let p = item.as_str().ok_or_else(|| {
-                    AppError::BadRequest("lookup fields must contain strings".to_string())
-                })?;
-                mapped.push(map_path_alias(p, aliases));
-            }
-            *fields = json!(mapped);
-        }
-        if let Some(nested) = spec_obj.get_mut("lookups") {
-            normalize_lookup_aliases(nested, aliases)?;
-        }
-    }
-    Ok(())
-}
-
-fn map_path_alias(path: &str, aliases: &[(String, String)]) -> String {
-    for (from, to) in aliases {
-        if path == from {
-            return to.clone();
-        }
-        let prefix = format!("{from}.");
-        if path.starts_with(&prefix) {
-            return format!("{to}.{}", &path[prefix.len()..]);
-        }
-    }
-    path.to_string()
-}
-
-fn apply_response_legacy_aliases(response: &mut GatewayResponse, state: &AppState) {
-    if state.legacy_response_aliases.is_empty() {
-        return;
-    }
-    if let Some(data) = response.data.as_mut() {
-        apply_response_aliases_recursive(data, state.legacy_response_aliases.as_ref());
-    }
-}
-
-fn apply_response_aliases_recursive(value: &mut Value, aliases: &[(String, String)]) {
-    match value {
-        Value::Object(obj) => {
-            for (alias_key, canonical_key) in aliases {
-                if obj.contains_key(alias_key) {
-                    continue;
-                }
-                if let Some(v) = obj.get(canonical_key).cloned() {
-                    obj.insert(alias_key.clone(), v);
-                }
-            }
-            for child in obj.values_mut() {
-                apply_response_aliases_recursive(child, aliases);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                apply_response_aliases_recursive(item, aliases);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn normalize_max_docs(max_docs: Option<i64>, matched: i64) -> AppResult<usize> {
     let limit = max_docs.unwrap_or(matched);
     if limit < -1 {
@@ -2284,13 +2034,30 @@ async fn hard_delete_document_ids(
     let placeholders = vec!["?"; ids.len()].join(", ");
     let mut binds: Vec<libsql::Value> = Vec::new();
     let where_clause = where_ids_with_scope(&mut binds, collection, ids, &placeholders);
-    let deleted = conn
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| AppError::Internal(format!("hard delete tx begin failed: {e}")))?;
+    tx.execute(
+        &format!(
+            "DELETE FROM __kdb_document_transitions WHERE document_id IN (
+                 SELECT id FROM __kdb_documents WHERE {where_clause}
+             )"
+        ),
+        binds.clone(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("hard delete transitions failed: {e}")))?;
+    let deleted = tx
         .execute(
             &format!("DELETE FROM __kdb_documents WHERE {where_clause}"),
             binds,
         )
         .await
         .map_err(|e| AppError::Internal(format!("hard delete failed: {e}")))?;
+    tx.commit()
+        .await
+        .map_err(|e| AppError::Internal(format!("hard delete tx commit failed: {e}")))?;
     Ok(deleted as usize)
 }
 

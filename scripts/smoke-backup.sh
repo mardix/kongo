@@ -16,7 +16,7 @@ SMOKE_ROOT="${KONGODB_SMOKE_ROOT:-./.smoke/backup}"
 DATA_DIR="${KONGODB_DATA_DIR:-${SMOKE_ROOT}/data}"
 BACKUP_DIR="${KONGODB_BACKUP_PATH:-${SMOKE_ROOT}/backups}"
 LOG_FILE="${KONGODB_SMOKE_LOG:-${SMOKE_ROOT}/logs/smoke-backup.log}"
-BIN="${KONGODB_BIN:-./target/debug/kongodb}"
+BIN="${KONGODB_BIN:-./target/debug/kongo}"
 DB="${KONGODB_SMOKE_DB:-smoke.backup.main}"
 NS="${KONGODB_SMOKE_NAMESPACE:-backup_users}"
 
@@ -122,8 +122,8 @@ CREATE="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d
 assert_contains "$CREATE" '"status":"success"' "create_db should succeed"
 INS="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"insert\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"name\":\"backup-smoke\"}}}")"
 assert_contains "$INS" '"status":"success"' "insert should succeed"
-BASE_SET="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"set\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"_id\":\"restore-doc\",\"value\":\"before\"}}}")"
-assert_contains "$BASE_SET" '"status":"success"' "set baseline should succeed"
+BASE_SET="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"insert\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"_id\":\"restore-doc\",\"value\":\"before\"}}}")"
+assert_contains "$BASE_SET" '"status":"success"' "insert baseline should succeed"
 
 echo "[5/8] manual create_backup"
 MANUAL="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"create_backup\",\"payload\":{}}")"
@@ -153,11 +153,11 @@ if ! grep -Eq '.*/[a-zA-Z0-9._-]+--[a-f0-9]{16}/[0-9]{8}T[0-9]{6}Z_0001\.db\.zst
 fi
 
 echo "[6/8] restore_backup from artifact"
-MUTATE="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"set\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"_id\":\"restore-doc\",\"value\":\"after\"}}}")"
+MUTATE="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"update\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"_id\":\"restore-doc\",\"value\":\"after\"}}}")"
 assert_contains "$MUTATE" '"status":"success"' "mutate after backup should succeed"
 RESTORE="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"restore_backup\",\"payload\":{\"backup_db_path\":\"$BACKUP_PATH\"}}")"
 assert_contains "$RESTORE" '"status":"success"' "restore_backup should succeed"
-GET_AFTER="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"get\",\"payload\":{\"id\":\"restore-doc\"}}")"
+GET_AFTER="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"query\",\"namespace\":\"*\",\"payload\":{\"filter\":{\"_id\":\"restore-doc\"}}}")"
 assert_contains "$GET_AFTER" '"value":"before"' "restore_backup should restore pre-mutation state"
 
 echo "[7/8] auto-backup worker"

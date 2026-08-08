@@ -15,7 +15,7 @@ GATEWAY_URL="${BASE_URL}${GATEWAY_PATH}"
 SMOKE_ROOT="${KONGODB_SMOKE_ROOT:-./.smoke/import-jobs}"
 DATA_DIR="${KONGODB_DATA_DIR:-${SMOKE_ROOT}/data}"
 LOG_FILE="${KONGODB_SMOKE_LOG:-${SMOKE_ROOT}/logs/import-jobs.log}"
-BIN="${KONGODB_BIN:-./target/debug/kongodb}"
+BIN="${KONGODB_BIN:-./target/debug/kongo}"
 DB="${KONGODB_SMOKE_DB:-smoke.import.jobs}"
 NS="${KONGODB_SMOKE_NAMESPACE:-imports_users}"
 
@@ -73,14 +73,14 @@ rm -rf "$SMOKE_ROOT"
 mkdir -p "$DATA_DIR" "$(dirname "$LOG_FILE")"
 
 cat >"$GOOD_JSONL" <<'JSONL'
-{"_key":"u1","name":"Alice","legacy":{"drop":"x"}}
-{"_key":"u2","name":"Bob","legacy":{"drop":"y"}}
+{"_id":"u1","_key":"legacy-u1","name":"Alice","legacy":{"drop":"x"}}
+{"_id":"u2","_key":"legacy-u2","name":"Bob","legacy":{"drop":"y"}}
 JSONL
 
 cat >"$BAD_JSONL" <<'JSONL'
-{"_key":"b1","name":"Bad One"}
-{"_key":"broken"
-{"_key":"b2","name":"Bad Two"}
+{"_id":"b1","name":"Bad One"}
+{"_id":"broken"
+{"_id":"b2","name":"Bad Two"}
 JSONL
 
 echo "[3/9] starting server on :$PORT"
@@ -109,7 +109,7 @@ CREATE="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d
 assert_contains "$CREATE" '"status":"success"' "create should succeed"
 
 echo "[5/9] enqueue good import job"
-ENQ_GOOD="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"import_jsonl\",\"namespace\":\"$NS\",\"payload\":{\"source_path\":\"$GOOD_JSONL\",\"on_conflict\":\"error\",\"batch_size\":2,\"alias_import_pk\":\"_key:_id\",\"drop_keys\":[\"legacy.drop\"]}}")"
+ENQ_GOOD="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"import_jsonl\",\"namespace\":\"$NS\",\"payload\":{\"source_path\":\"$GOOD_JSONL\",\"on_conflict\":\"error\",\"batch_size\":2,\"drop_keys\":[\"legacy.drop\"]}}")"
 assert_contains "$ENQ_GOOD" '"status":"success"' "good import enqueue should succeed"
 GOOD_JOB_ID="$(json_extract_first "$ENQ_GOOD" "job_id")"
 if [[ -z "$GOOD_JOB_ID" ]]; then
@@ -133,13 +133,13 @@ if [[ "$GOOD_DONE" -ne 1 ]]; then
   exit 1
 fi
 
-GET_U1="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"get\",\"namespace\":\"$NS\",\"payload\":{\"id\":\"u1\"}}")"
-assert_contains "$GET_U1" '"status":"success"' "get u1 should succeed"
-assert_contains "$GET_U1" '"_id":"u1"' "alias_import_pk should map _key to _id"
+GET_U1="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"query\",\"namespace\":\"$NS\",\"payload\":{\"filter\":{\"_id\":\"u1\"}}}")"
+assert_contains "$GET_U1" '"status":"success"' "query u1 should succeed"
+assert_contains "$GET_U1" '"_key":"legacy-u1"' "_key should remain ordinary document data"
 assert_not_contains "$GET_U1" '"drop":"x"' "drop_keys should remove nested path"
 
 echo "[6/9] enqueue bad resumable import job"
-ENQ_BAD="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"import_jsonl\",\"namespace\":\"$NS\",\"payload\":{\"source_path\":\"$BAD_JSONL\",\"on_conflict\":\"error\",\"batch_size\":1,\"alias_import_pk\":\"_key:_id\",\"resumable\":true}}")"
+ENQ_BAD="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"$DB\",\"operation\":\"import_jsonl\",\"namespace\":\"$NS\",\"payload\":{\"source_path\":\"$BAD_JSONL\",\"on_conflict\":\"error\",\"batch_size\":1,\"resumable\":true}}")"
 assert_contains "$ENQ_BAD" '"status":"success"' "bad import enqueue should succeed"
 BAD_JOB_ID="$(json_extract_first "$ENQ_BAD" "job_id")"
 if [[ -z "$BAD_JOB_ID" ]]; then

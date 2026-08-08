@@ -31,19 +31,6 @@ struct UpsertPreparedInputs {
     update_data: Value,
 }
 
-#[derive(Clone, Debug)]
-struct SetPreparedInput {
-    collection: Option<String>,
-    dry_run: bool,
-    id: String,
-    user_id: Option<String>,
-    data: Value,
-    data_str: String,
-    size: i64,
-    expires_at: Option<i64>,
-    expiry_behavior: String,
-}
-
 fn parse_insert_common_options(payload: &OperationPayload) -> AppResult<InsertCommonOptions> {
     Ok(InsertCommonOptions {
         dry_run: payload.dry_run.unwrap_or(false),
@@ -58,7 +45,7 @@ fn prepare_insert_documents(data: Option<Value>, bulk: bool) -> AppResult<Prepar
     if bulk {
         let arr = data
             .as_array()
-            .ok_or_else(|| AppError::BadRequest("data must be an array for insert_bulk".to_string()))?;
+            .ok_or_else(|| AppError::BadRequest("data must be an object or array".to_string()))?;
         if arr.is_empty() {
             return Err(AppError::BadRequest("data cannot be empty".to_string()));
         }
@@ -148,43 +135,30 @@ fn prepare_upsert_inputs(payload: OperationPayload) -> AppResult<UpsertPreparedI
     })
 }
 
-fn prepare_set_input(payload: OperationPayload) -> AppResult<SetPreparedInput> {
-    if payload.ids.is_some() {
+fn exact_id_from_upsert_filter(filter: &Value) -> AppResult<Option<String>> {
+    let Some(value) = filter.as_object().and_then(|obj| obj.get("_id")) else {
+        return Ok(None);
+    };
+    let value = match value {
+        Value::String(value) => value,
+        Value::Object(op) if op.len() == 1 => match op.get("$eq") {
+            Some(Value::String(value)) => value,
+            Some(_) => {
+                return Err(AppError::BadRequest(
+                    "upsert filter _id.$eq must be a non-empty string".to_string(),
+                ));
+            }
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let id = value.trim();
+    if id.is_empty() {
         return Err(AppError::BadRequest(
-            "set accepts only one document; use data._id or id".to_string(),
+            "upsert filter _id must be a non-empty string".to_string(),
         ));
     }
-    let collection = resolve_collection_scope_optional_collection(&payload)?;
-    let dry_run = payload.dry_run.unwrap_or(false);
-    let payload_user_id = clean_optional(payload.document_user_id.clone());
-    let mut data = require_object(payload.data, "data")?;
-    expand_kdb_macros_in_value(&mut data)?;
-    let user_id = normalize_document_user_id_from_doc(&mut data, payload_user_id.as_deref())?;
-    let id = data
-        .get("_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::BadRequest("data._id is required".to_string()))?
-        .to_string();
-    if data.as_object().expect("object checked").len() == 1 {
-        return Err(AppError::BadRequest(
-            "data must include fields beyond _id".to_string(),
-        ));
-    }
-    let data_str = data.to_string();
-    let size = data_str.len() as i64;
-    let expires_at = ttl_to_expires_at(payload.ttl_seconds)?;
-    let expiry_behavior = normalized_expiry_behavior(payload.expiry_behavior.as_deref());
-    Ok(SetPreparedInput {
-        collection,
-        dry_run,
-        id,
-        user_id,
-        data,
-        data_str,
-        size,
-        expires_at,
-        expiry_behavior,
-    })
+    Ok(Some(id.to_string()))
 }
 
 async fn insert(
@@ -197,6 +171,12 @@ async fn insert(
     let collection = require_collection(&payload)?;
     let common = parse_insert_common_options(&payload)?;
     let bulk = matches!(payload.data.as_ref(), Some(Value::Array(_)));
+    let lifecycle_specs = parse_document_lifecycle(payload.lifecycle.clone())?;
+    if bulk && !lifecycle_specs.is_empty() {
+        return Err(AppError::BadRequest(
+            "lifecycle is only supported for a single-document insert".to_string(),
+        ));
+    }
     let ttl_seconds = payload.ttl_seconds;
     let payload_user_id = clean_optional(payload.document_user_id.clone());
     let expiry_behavior = normalized_expiry_behavior(payload.expiry_behavior.as_deref());
@@ -216,13 +196,15 @@ async fn insert(
             count_bulk_unique_skips(conn, &collection, &docs, &common.unique_fields).await?
         };
         let inserted_count = docs.len().saturating_sub(skipped_count);
-        return Ok(GatewayResponse::ok(Some(json!({
+        let mut response = GatewayResponse::ok(Some(json!({
             "items": docs,
             "count": inserted_count,
             "inserted_count": inserted_count,
             "skipped_count": skipped_count,
             "dry_run": true
-        }))));
+        })));
+        add_lifecycle_dry_run_response(&mut response, &lifecycle_specs);
+        return Ok(response);
     }
 
     let mut docs_to_insert = Vec::<(Value, Option<String>)>::new();
@@ -284,6 +266,9 @@ async fn insert(
         )
         .await
         .map_err(|e| AppError::Conflict(format!("insert failed: {e}")))?;
+        for spec in &lifecycle_specs {
+            upsert_transition_on_tx(&tx, id, &collection, spec).await?;
+        }
         kept_ids.push(id.to_string());
     }
 
@@ -308,15 +293,86 @@ async fn insert(
     )
     .await?;
 
-    Ok(GatewayResponse::ok(Some(json!({
+    let mut response = GatewayResponse::ok(Some(json!({
         "items": items,
         "count": items.len(),
         "inserted_count": items.len(),
         "skipped_count": skipped_count
-    }))))
+    })));
+    add_lifecycle_response(&mut response, &lifecycle_specs);
+    Ok(response)
 }
 
 async fn update(
+    state: &AppState,
+    db_path: &str,
+    conn: &libsql::Connection,
+    mut req: GatewayRequest,
+) -> AppResult<GatewayResponse> {
+    let lifecycle_specs = parse_document_lifecycle(req.payload.lifecycle.take())?;
+    if lifecycle_specs.is_empty() {
+        return update_inner(state, conn, req).await;
+    }
+    if req.payload.filter.is_some() || !matches!(req.payload.data, Some(Value::Object(_))) {
+        return Err(AppError::BadRequest(
+            "lifecycle is only supported for update with one data object containing _id"
+                .to_string(),
+        ));
+    }
+    let document_id = req
+        .payload
+        .data
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|data| data.get("_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("data._id is required with lifecycle".to_string()))?
+        .to_string();
+    let collection = resolve_collection_scope_optional_collection(&req.payload)?;
+    let actual_collection =
+        resolve_transition_document(conn, &document_id, collection.as_deref()).await?;
+    if req.payload.dry_run.unwrap_or(false) {
+        let mut response = update_inner(state, conn, req).await?;
+        add_lifecycle_dry_run_response(&mut response, &lifecycle_specs);
+        return Ok(response);
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| AppError::Internal(format!("update lifecycle tx begin failed: {e}")))?;
+    let result = async {
+        let mut response = update_inner(state, conn, req).await?;
+        for spec in &lifecycle_specs {
+            upsert_transition_on_conn(conn, &document_id, &actual_collection, spec).await?;
+        }
+        add_lifecycle_response(&mut response, &lifecycle_specs);
+        Ok(response)
+    }
+    .await;
+    match result {
+        Ok(response) => {
+            conn.execute_batch("COMMIT").await.map_err(|e| {
+                AppError::Internal(format!("update lifecycle tx commit failed: {e}"))
+            })?;
+            state
+                .db_manager
+                .append_wal_record(
+                    db_path,
+                    "UPDATE_DOCUMENT_LIFECYCLE",
+                    &json!({"document_id": document_id, "count": lifecycle_specs.len()})
+                        .to_string(),
+                )
+                .await?;
+            Ok(response)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK").await;
+            Err(error)
+        }
+    }
+}
+
+async fn update_inner(
     state: &AppState,
     conn: &libsql::Connection,
     req: GatewayRequest,
@@ -501,197 +557,76 @@ async fn update(
     }
 }
 
-async fn set(
-    state: &AppState,
-    conn: &libsql::Connection,
-    req: GatewayRequest,
-) -> AppResult<GatewayResponse> {
-    let prepared = prepare_set_input(req.payload)?;
-    let collection = prepared.collection;
-    let dry_run = prepared.dry_run;
-    let data = prepared.data;
-    let id = prepared.id;
-    let user_id = prepared.user_id;
-    let data_str = prepared.data_str;
-    let size = prepared.size;
-    let expires_at = prepared.expires_at;
-    let expiry_behavior = prepared.expiry_behavior;
-
-    if dry_run {
-        let matched = count_by_ids(conn, collection.as_deref(), std::slice::from_ref(&id)).await?;
-        let would_insert = collection.is_some() && matched == 0;
-        return Ok(GatewayResponse::ok(Some(json!({
-            "items": [data],
-            "count": 1,
-            "matched_count": matched,
-            "updated_count": matched,
-            "inserted_count": if would_insert { 1 } else { 0 },
-            "dry_run": true
-        }))));
-    }
-
-    if let Some(collection) = collection {
-        let updated = if update_requires_mutation_engine(data.as_object().expect("object checked")) {
-            let mut patch_obj = data
-                .as_object()
-                .cloned()
-                .ok_or_else(|| AppError::BadRequest("data must be object".to_string()))?;
-            if update_one_with_mutation(
-                conn,
-                Some(collection.as_str()),
-                &id,
-                &mut patch_obj,
-                state.strict_mutation_operators,
-                state.jsonb_enabled,
-            )
-            .await?
-            .is_some()
-            {
-                1
-            } else {
-                0
-            }
-        } else {
-            let patch_expr = json_patch_expr(state.jsonb_enabled);
-            conn.execute(
-                &format!(
-                    "UPDATE __kdb_documents
-                     SET data = {patch_expr},
-                         _user_id = COALESCE(?, _user_id),
-                         _size_bytes = length({patch_expr}),
-                         _modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                     WHERE collection = ? AND id = ?"
-                ),
-                libsql::params![
-                    data_str.clone(),
-                    to_sql_nullable_text(user_id.clone()),
-                    data_str.clone(),
-                    collection.clone(),
-                    id.clone()
-                ],
-            )
-            .await
-            .map_err(|e| AppError::Internal(format!("set update failed: {e}")))?
-        };
-
-        if updated > 0 {
-            let items = fetch_kdb_documents_by_ids(
-                conn,
-                Some(collection.as_str()),
-                std::slice::from_ref(&id),
-                state.response_include_system_timestamps,
-            )
-            .await?;
-            return Ok(GatewayResponse::ok(Some(json!({
-                "items": items,
-                "count": items.len(),
-                "matched_count": items.len(),
-                "updated_count": items.len(),
-                "inserted_count": 0
-            }))));
-        }
-
-        let data_expr = json_input_expr(state.jsonb_enabled);
-        conn.execute(
-            &format!(
-                "INSERT INTO __kdb_documents (id, collection, _user_id, data, _size_bytes, _expires_at, _expiry_behavior)
-                 VALUES (?, ?, ?, {data_expr}, ?, ?, ?)"
-            ),
-            libsql::params![
-                id.clone(),
-                collection.clone(),
-                to_sql_nullable_text(user_id.clone()),
-                data_str,
-                size,
-                expires_at,
-                expiry_behavior
-            ],
-        )
-        .await
-        .map_err(|e| AppError::Conflict(format!("set insert failed: {e}")))?;
-
-        let items = fetch_kdb_documents_by_ids(
-            conn,
-            Some(collection.as_str()),
-            std::slice::from_ref(&id),
-            state.response_include_system_timestamps,
-        )
-        .await?;
-        return Ok(GatewayResponse::ok(Some(json!({
-            "items": items,
-            "count": 1,
-            "matched_count": 0,
-            "updated_count": 0,
-            "inserted_count": 1
-        }))));
-    }
-
-    let updated = if update_requires_mutation_engine(data.as_object().expect("object checked")) {
-        let mut patch_obj = data
-            .as_object()
-            .cloned()
-            .ok_or_else(|| AppError::BadRequest("data must be object".to_string()))?;
-        if update_one_with_mutation(
-            conn,
-            None,
-            &id,
-            &mut patch_obj,
-            state.strict_mutation_operators,
-            state.jsonb_enabled,
-        )
-        .await?
-        .is_some()
-        {
-            1
-        } else {
-            0
-        }
-    } else {
-        let patch_expr = json_patch_expr(state.jsonb_enabled);
-        conn.execute(
-            &format!(
-                "UPDATE __kdb_documents
-                 SET data = {patch_expr},
-                     _user_id = COALESCE(?, _user_id),
-                     _size_bytes = length({patch_expr}),
-                     _modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE id = ?"
-            ),
-            libsql::params![
-                data_str.clone(),
-                to_sql_nullable_text(user_id.clone()),
-                data_str,
-                id.clone()
-            ],
-        )
-        .await
-        .map_err(|e| AppError::Internal(format!("set update failed: {e}")))?
-    };
-    if updated == 0 {
-        return Err(AppError::NotFound(
-            "document not found for set without collection".to_string(),
-        ));
-    }
-    let items = fetch_kdb_documents_by_ids(
-        conn,
-        None,
-        std::slice::from_ref(&id),
-        state.response_include_system_timestamps,
-    )
-    .await?;
-    Ok(GatewayResponse::ok(Some(json!({
-        "items": items,
-        "count": 1,
-        "matched_count": 1,
-        "updated_count": 1,
-        "inserted_count": 0
-    }))))
-}
-
-
 // Additional write handlers extracted from dispatcher.rs.
 
 async fn upsert(
+    state: &AppState,
+    db_path: &str,
+    conn: &libsql::Connection,
+    mut req: GatewayRequest,
+) -> AppResult<GatewayResponse> {
+    let lifecycle_specs = parse_document_lifecycle(req.payload.lifecycle.take())?;
+    if lifecycle_specs.is_empty() {
+        return upsert_inner(state, db_path, conn, req).await;
+    }
+    if req.payload.max_docs.unwrap_or(1) != 1 {
+        return Err(AppError::BadRequest(
+            "upsert with lifecycle requires max_docs=1".to_string(),
+        ));
+    }
+    if req.payload.dry_run.unwrap_or(false) {
+        let mut response = upsert_inner(state, db_path, conn, req).await?;
+        add_lifecycle_dry_run_response(&mut response, &lifecycle_specs);
+        return Ok(response);
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| AppError::Internal(format!("upsert lifecycle tx begin failed: {e}")))?;
+    let result = async {
+        let mut response = upsert_inner(state, db_path, conn, req).await?;
+        let document_id = response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("items"))
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("_id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AppError::Internal("upsert lifecycle result document id missing".to_string())
+            })?
+            .to_string();
+        let collection = resolve_transition_document(conn, &document_id, None).await?;
+        for spec in &lifecycle_specs {
+            upsert_transition_on_conn(conn, &document_id, &collection, spec).await?;
+        }
+        add_lifecycle_response(&mut response, &lifecycle_specs);
+        Ok(response)
+    }
+    .await;
+    match result {
+        Ok(response) => {
+            conn.execute_batch("COMMIT").await.map_err(|e| {
+                AppError::Internal(format!("upsert lifecycle tx commit failed: {e}"))
+            })?;
+            state
+                .db_manager
+                .append_wal_record(
+                    db_path,
+                    "UPSERT_DOCUMENT_LIFECYCLE",
+                    &json!({"count": lifecycle_specs.len()}).to_string(),
+                )
+                .await?;
+            Ok(response)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK").await;
+            Err(error)
+        }
+    }
+}
+
+async fn upsert_inner(
     state: &AppState,
     db_path: &str,
     conn: &libsql::Connection,
@@ -708,6 +643,7 @@ async fn upsert(
     let mut insert_data = prepared.insert_data;
     let update_data = prepared.update_data;
     let filter = prepared.filter;
+    let insert_id = exact_id_from_upsert_filter(&filter)?;
 
     let (where_clause, binds) = build_where_with_collection(filter, collection.clone())?;
     let matched_count = execute_count(conn, "__kdb_documents", &where_clause, binds.clone()).await?;
@@ -801,7 +737,7 @@ async fn upsert(
         }))));
     }
 
-    let id = Uuid::new_v4().simple().to_string();
+    let id = insert_id.unwrap_or_else(|| Uuid::new_v4().simple().to_string());
     insert_data
         .as_object_mut()
         .expect("object checked")

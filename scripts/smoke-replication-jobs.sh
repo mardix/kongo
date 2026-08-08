@@ -15,7 +15,7 @@ GATEWAY_URL="${BASE_URL}${GATEWAY_PATH}"
 SMOKE_ROOT="${KONGODB_SMOKE_ROOT:-./.smoke/replication-jobs}"
 DATA_DIR="${KONGODB_DATA_DIR:-${SMOKE_ROOT}/data}"
 LOG_FILE="${KONGODB_SMOKE_LOG:-${SMOKE_ROOT}/logs/smoke-replication-jobs.log}"
-BIN="${KONGODB_BIN:-./target/debug/kongodb}"
+BIN="${KONGODB_BIN:-./target/debug/kongo}"
 DB="${KONGODB_SMOKE_DB:-smoke.replication.jobs}"
 
 need_cmd() {

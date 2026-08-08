@@ -13,7 +13,7 @@ export function crudPreset(kind, db, namespace) {
     delete: { db, operation: 'delete', namespace, payload: { id: 'paste-id-here' } },
     count: { db, operation: 'count', namespace, payload: { filter: {} } },
     aggregate: { db, operation: 'aggregate', namespace, payload: { filter: {}, compute: { total: { $count: '*' } } } },
-    search: { db, operation: 'search', namespace, payload: { search: 'ada', limit: 25 } }
+    search: { db, operation: 'query', namespace, payload: { search: 'ada', limit: 25 } }
   };
   return presets[kind] || presets.query;
 }

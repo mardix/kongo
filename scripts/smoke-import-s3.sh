@@ -136,7 +136,7 @@ fi
 
 MISMATCH_FAILED=0
 for _ in $(seq 1 60); do
-  JOB="$(api_post "{\"db\":\"$DB\",\"operation\":\"get_import_job\",\"payload\":{\"job_id\":\"$MISMATCH_JOB\"}}")"
+  JOB="$(api_post "{\"db\":\"$DB\",\"operation\":\"get_job\",\"payload\":{\"job_id\":\"$MISMATCH_JOB\",\"job_type\":\"import_jsonl\"}}")"
   if grep -Fq '"status":"failed"' <<<"$JOB"; then
     assert_contains "$JOB" 'source_hash mismatch' "mismatch error message should be present"
     MISMATCH_FAILED=1
@@ -160,7 +160,7 @@ fi
 
 FAILED_ONCE=0
 for _ in $(seq 1 60); do
-  JOB="$(api_post "{\"db\":\"$DB\",\"operation\":\"get_import_job\",\"payload\":{\"job_id\":\"$RESUME_JOB\"}}")"
+  JOB="$(api_post "{\"db\":\"$DB\",\"operation\":\"get_job\",\"payload\":{\"job_id\":\"$RESUME_JOB\",\"job_type\":\"import_jsonl\"}}")"
   if grep -Fq '"status":"failed"' <<<"$JOB"; then
     assert_contains "$JOB" '"last_byte_offset":' "job should include byte offset checkpoint"
     FAILED_ONCE=1
@@ -174,12 +174,12 @@ if [[ "$FAILED_ONCE" -ne 1 ]]; then
 fi
 
 echo "[6/8] continue failed job" | tee -a "$LOG_FILE"
-CONT="$(api_post "{\"db\":\"$DB\",\"operation\":\"continue_import\",\"payload\":{\"job_id\":\"$RESUME_JOB\"}}")"
-assert_contains "$CONT" '"status":"success"' "continue_import should succeed"
+CONT="$(api_post "{\"db\":\"$DB\",\"operation\":\"continue_job\",\"payload\":{\"job_id\":\"$RESUME_JOB\",\"job_type\":\"import_jsonl\"}}")"
+assert_contains "$CONT" '"status":"success"' "continue_job should succeed"
 
 COMPLETED=0
 for _ in $(seq 1 60); do
-  JOB="$(api_post "{\"db\":\"$DB\",\"operation\":\"get_import_job\",\"payload\":{\"job_id\":\"$RESUME_JOB\"}}")"
+  JOB="$(api_post "{\"db\":\"$DB\",\"operation\":\"get_job\",\"payload\":{\"job_id\":\"$RESUME_JOB\",\"job_type\":\"import_jsonl\"}}")"
   if grep -Fq '"status":"completed"' <<<"$JOB"; then
     COMPLETED=1
     break

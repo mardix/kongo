@@ -29,8 +29,8 @@ View the full [Documentation](./DOCUMENTATION.md).
    - [Metrics](#metrics)
    - [Audit Logs](#audit-logs)
    - [Advanced (Database, Jobs, Admin, Namespace)](#advanced-database-jobs-admin-namespace)
-8. [Filters, Compute & Lookups (JQL)](#filters-compute--lookups-jql)
-9. [Write-Time Value Operators](#write-time-value-operators)
+8. [Filter Operators, Compute Operators & Lookup Operators](#filter-operators-compute-operators--lookup-operators)
+9. [Generator Operators & Mutation Operators](#generator-operators--mutation-operators)
 10. [Payload Field Reference](#payload-field-reference)
 11. [Configuration Reference](#configuration-reference)
 12. [Admin UI](#admin-ui)
@@ -58,7 +58,7 @@ View the full [Documentation](./DOCUMENTATION.md).
   Store schemaless JSON documents in namespaces while retaining direct access to SQLite tables and SQL queries.
 
 - **Complete Document Operations**
-  Insert, update, delete, query, aggregate, upsert, paginate, project fields, sort, filter, join related documents, and manage TTL-based expiration.
+  Insert, update, delete, query, aggregate, upsert, paginate, project fields, sort, filter, join related documents, and manage TTL or scheduled conditional lifecycle changes.
 
 - **SQLite Interface**
   Create and inspect user tables, execute parameterized SQL, browse records, and use supported DDL without exposing Kongo's internal tables.
@@ -199,9 +199,10 @@ Open the Admin UI at `http://localhost:8080/_/kdb/admin/` (username `kongo`, pas
 - `namespace` and `namespaces` are mutually exclusive.
 - Shorthand alias works too: `"operation": "query::users"` → `operation=query`, `namespace=users`. Same for `query::*` and `query::users,admins,teams`. Shorthand can't be mixed with a top-level `namespace`/`namespaces`.
 - Namespace requirements by operation type:
-  - **Required:** `insert`, `query`, `search`
+  - **Required:** `insert`, `query`
   - **Insert-family:** must be a single concrete namespace — no `*`, no `namespaces[]`
-  - **ID-targeted** (`get`, `set`, `update`, `delete`): namespace optional, strict if given
+  - **ID-targeted writes** (`update`, `delete`): namespace optional, strict if given
+  - **Global ID reads:** `query` with `namespace="*"` and `_id`/`_id.$in` in `filter`
   - **Filter/wide ops:** namespace required unless `scope=all` is explicitly supported and set
 - `namespace: "*"` is shorthand for `payload.scope: "all"` (conflicts with `payload.scope: "collection"`).
 - Only three operations can create a brand-new db: `create_db`, `insert`, `import_jsonl`.
@@ -255,14 +256,16 @@ The bread and butter — documents in, documents out.
 |---|---|---|
 | `insert` | `namespace`, `data` | Insert one or many docs. Supports `unique_fields` + `on_conflict` for soft dedupe. |
 | `update` | `data(with _id)` or `filter + data` or `data(array)` | Patch one doc, many by filter, or many by explicit ids. `replace=true` only works single-doc. |
-| `set` | `data(with _id)` | With `namespace` → upsert by id. Without → update-only. |
-| `upsert` | `filter`, `insert_data` | Update on match, insert on miss. |
-| `get` | `id` / `ids` / `data._id` | Fetch by id(s). Sees pending accepted writes unless `force_db=true`. |
+| `upsert` | `namespace`, `filter`, `insert_data` | Update on match, insert on miss; exact `_id` filters preserve that id. |
 | `count` | — | Count matches, filter optional. |
-| `query` | `namespace`/`namespaces`/`*` | Filter, sort, paginate, project, lookup, per-row compute. |
+| `query` | `namespace`/`namespaces`/`*` | Filter, sort, paginate, project, lookup, per-row compute, or FTS with `payload.search`. |
 | `aggregate` | `compute` | Set-level metrics: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$distinct`. |
 | `delete` | one of `id` / `ids` / `filter` | Soft-delete to archive by default; `purge=true` hard-deletes. |
 | `set_ttl` | `ids`/`filter` + `ttl_seconds` | Set or reset a document's TTL. |
+| `schedule_transition` | Document, name, time, condition, update | Schedule or replace a named future conditional document mutation. |
+| `cancel_transition` | Transition selector | Cancel a pending transition. |
+| `get_transition` / `list_transitions` | Optional selectors | Inspect lifecycle state and history. |
+| `retry_transition` | Failed transition selector | Explicitly reopen a failed transition. |
 | `import_jsonl` | `namespace`, `source_path` | Enqueue a background JSONL import job. |
 | `export_jsonl` | — | Enqueue a background JSONL export job. |
 
@@ -311,23 +314,6 @@ The bread and butter — documents in, documents out.
 }
 ```
 
-**`set`** — upsert a single document by id:
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "set",
-  "namespace": "users",
-  "payload": {
-    "data": {
-      "_id": "u1",
-      "name": "Ada",
-      "plan": "pro"
-    }
-  }
-}
-```
-
 **`upsert`** — update on match, insert on miss:
 
 ```json
@@ -354,15 +340,15 @@ The bread and butter — documents in, documents out.
 }
 ```
 
-**`get`** — fetch by id(s):
+**`query`** — fetch explicit ids globally:
 
 ```json
 {
   "db": "myapp/main",
-  "operation": "get",
-  "namespace": "users",
+  "operation": "query",
+  "namespace": "*",
   "payload": {
-    "ids": ["u1", "u2"],
+    "filter": { "_id": { "$in": ["u1", "u2"] } },
     "fields": ["name", "email"]
   }
 }
@@ -516,7 +502,7 @@ Stores login-related metadata for your app. **Kongo does not authenticate anyone
 | `user_create` | — | Create a user record (email, username, profile, provider link, `data`). |
 | `user_get` | `user_id`/`id`/`email`/`username` or `provider`+`provider_user_id` | Fetch one user. |
 | `user_get_details` | same selectors | Fetch a user plus linked providers and recent events. |
-| `user_list` | — | Paginated user search/list. |
+| `user_query` | — | Paginated user search/list. |
 | `user_update` | `user_id`/`id` | Update profile fields + `data`. |
 | `user_update_status` | `user_id`/`id`, `status` | Set status, optionally schedule an automatic future transition. |
 | `user_delete` | `user_id`/`id` | Soft-delete (revokes tokens, keeps identity reserved) or `purge=true` to hard-delete everything. |
@@ -573,12 +559,12 @@ Stores login-related metadata for your app. **Kongo does not authenticate anyone
 }
 ```
 
-**`user_list`**:
+**`user_query`**:
 
 ```json
 {
   "db": "app/main",
-  "operation": "user_list",
+  "operation": "user_query",
   "payload": {
     "search": "gmail.com",
     "status": "active",
@@ -689,7 +675,7 @@ Metadata only — Kongo never touches the actual bytes. Your app still owns uplo
 |---|---|---|
 | `file_create` | `storage_backend`, `storage_path` | Register a file/object's metadata. |
 | `file_get` | `id` | Fetch one file record. |
-| `file_list` | — | List/search by bucket, owner, status, backend, content type. |
+| `file_query` | — | List/search by bucket, owner, status, backend, content type. |
 | `file_update` | `id` | Update mutable metadata. |
 | `file_delete` | `id` | Soft-delete by default; `purge=true` hard-deletes the row. |
 
@@ -729,12 +715,12 @@ Metadata only — Kongo never touches the actual bytes. Your app still owns uplo
 }
 ```
 
-**`file_list`** — all files attached to a user:
+**`file_query`** — all files attached to a user:
 
 ```json
 {
   "db": "app/main",
-  "operation": "file_list",
+  "operation": "file_query",
   "payload": {
     "owner_type": "user",
     "owner_id": "u123",
@@ -779,13 +765,13 @@ Metadata only — Kongo never touches the actual bytes. Your app still owns uplo
 
 ### SQLiteDB (SQL Stack)
 
-The escape hatch, when JQL isn't enough. `sql_execute` is gated behind `KONGODB_ENABLE_SQL_EXECUTE`.
+The escape hatch when document operations and Filter Operators are not enough. `sql_execute` uses the same gateway authentication as other operations.
 
 | Op | Needs | What it does |
 |---|---|---|
 | `sql_execute` | `sql` | One statement: `SELECT`/`WITH`/`EXPLAIN`/`INSERT`/`UPDATE`/`DELETE`/`REPLACE`, plus limited DDL (`CREATE TABLE`/`CREATE INDEX`/`DROP INDEX`/`ALTER TABLE ... ADD COLUMN`). Blocks `__kdb_*` and `sqlite_*` objects. |
-| `list_tables` | — | List your own SQL tables (internal tables excluded). |
-| `get_table_schema` | `table` | Safe `PRAGMA table_info` wrapper — arbitrary `PRAGMA` is not allowed. |
+| `sql_list_tables` | — | List your own SQL tables (internal tables excluded). |
+| `sql_get_table_schema` | `table` | Safe `PRAGMA table_info` wrapper — arbitrary `PRAGMA` is not allowed. |
 
 **`sql_execute`** — parameterized query:
 
@@ -800,22 +786,22 @@ The escape hatch, when JQL isn't enough. `sql_execute` is gated behind `KONGODB_
 }
 ```
 
-**`list_tables`**:
+**`sql_list_tables`**:
 
 ```json
 {
   "db": "myapp/main",
-  "operation": "list_tables",
+  "operation": "sql_list_tables",
   "payload": {}
 }
 ```
 
-**`get_table_schema`**:
+**`sql_get_table_schema`**:
 
 ```json
 {
   "db": "myapp/main",
-  "operation": "get_table_schema",
+  "operation": "sql_get_table_schema",
   "payload": {
     "table": "customers"
   }
@@ -826,21 +812,21 @@ The escape hatch, when JQL isn't enough. `sql_execute` is gated behind `KONGODB_
 
 ### FTS (Full-Text Search)
 
-Full-text search over live documents, powered by SQLite FTS5. Requires `enable_fts_index` to be run once per database before `search` will return results.
+Full-text search is a `query` mode over live documents, powered by SQLite FTS5. Enable access and build the index before querying.
 
 | Op | Needs | What it does |
 |---|---|---|
-| `search` | `namespace` + `search` | Full-text search (FTS5) over live docs, with filter/sort/pagination/projection/lookup. |
+| `query` with `payload.search` | `namespace` + `search` | Full-text search (FTS5) over live docs, with filter/sort/pagination/projection/lookup. |
 | `enable_fts_index` | — | Toggle the db-level FTS accessibility flag. |
 | `reindex_fts` | — | Enqueue an async FTS rebuild/backfill job. |
 | `drop_fts_index` | — | Enqueue an async FTS drop job. |
 
-**`search`**:
+**FTS query**:
 
 ```json
 {
   "db": "myapp/main",
-  "operation": "search",
+  "operation": "query",
   "namespace": "users",
   "payload": {
     "search": "ada",
@@ -1100,7 +1086,7 @@ Whole-database lifecycle: create, replicate, back up, restore, maintain.
 | `restore_backup` | one of `backup_db_path`/`backup_id`/`backup_tag`/`backup_at`/`latest` | Restore from a backup. |
 | `list_backups` / `tag_backup` | — | Browse and tag the backup catalog. |
 | `vacuum_db` | — | Run SQLite `VACUUM`. |
-| `reap_db` | — | Trigger the TTL reaper immediately. |
+| `reap_db` | — | Trigger TTL/archive cleanup and due document lifecycle transitions immediately. |
 
 #### Jobs
 
@@ -1149,9 +1135,9 @@ Manage whole namespaces as units instead of individual documents.
 
 ---
 
-## Filters, Compute & Lookups (JQL)
+## Filter Operators, Compute Operators & Lookup Operators
 
-### Filter operators (`payload.filter`)
+### Filter Operators (`payload.filter`)
 
 | Family | Operators |
 |---|---|
@@ -1187,12 +1173,12 @@ Manage whole namespaces as units instead of individual documents.
 }
 ```
 
-### Compute operators (`payload.compute`)
+### Compute Operators (`payload.compute`)
 
 - **Aggregate (set-level):** `$count`, `$sum`, `$avg`, `$min`, `$max`, `$distinct` — with `$distinct: true` and metric-local `$filter`.
 - **Query (per-row):** all of the above, plus `$size` and `$join`. Any `$`-prefixed string token in `$join` is a path on the current row (e.g. `$profile.email`).
 
-### Lookups (`payload.lookups`)
+### Lookup Operators (`payload.lookups`)
 
 Join in related data, keyed by alias:
 
@@ -1215,14 +1201,14 @@ Supports nested lookups, context selectors (`$self`, `$parent`, `$root`, `$looku
 
 ---
 
-## Write-Time Value Operators
+## Generator Operators & Mutation Operators
 
 Recognized inside `data`, `insert_data`, and `update_data` as single-key `$`-operator objects.
 
-**Generators** — create values at write time:
+**Generator Operators** — create values at write time:
 `$ts_now`, `$ts_now_ms`, `$id_uuidv4`, `$id_uuidv7`, `$id_random`, `$hash_value`
 
-**Mutations** — modify existing values in place:
+**Mutation Operators** — modify existing values in place:
 `$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`
 
 ```json
@@ -1246,7 +1232,7 @@ Recognized inside `data`, `insert_data`, and `update_data` as single-key `$`-ope
 }
 ```
 
-By default unknown mutation operators silently no-op. Set `KONGODB_STRICT_MUTATIONS_OPERATORS=true` to make them return an error instead.
+By default unknown Mutation Operators silently no-op. Set `KONGODB_STRICT_MUTATIONS_OPERATORS=true` to make them return an error instead.
 
 ---
 
@@ -1259,7 +1245,7 @@ The most commonly used fields across operations:
 | `id` / `ids` | string / string[] | Document selector(s) |
 | `data` | object/array | Main write payload |
 | `insert_data` / `update_data` | object | Upsert payloads |
-| `filter` | object | JQL filter |
+| `filter` | object | Filter expression composed from Filter Operators |
 | `sort` | object/string | Sort spec |
 | `limit` / `offset` / `page` / `per_page` | int | Pagination |
 | `fields` / `exclude_fields` | string[] | Projection |
@@ -1353,8 +1339,8 @@ Idle TTL reaper checks do not publish snapshots. A reaper checkpoint is created 
 | `KONGODB_QUERY_LOOKUP_MAX_DEPTH` | `3` | Default max nested lookup depth |
 | `KONGODB_QUERY_LOOKUP_UNCAPPED_OVERRIDE_ENABLED` | `false` | Allow a request to override the lookup depth cap |
 | `KONGODB_RESPONSE_INCLUDE_SYSTEM_TIMESTAMPS` | `true` | Include `_created_at`/`_modified_at` in responses by default |
-| `KONGODB_RESPONSE_INCLUDE_NAMESPACE` | `false` | Include `_namespace` in `get`/`query`/`search` item responses by default |
-| `KONGODB_STRICT_MUTATIONS_OPERATORS` | `false` | `true` makes unknown/invalid mutation operators (`$inc`, `$push`, etc.) return an error instead of silently no-op'ing |
+| `KONGODB_RESPONSE_INCLUDE_NAMESPACE` | `false` | Include `_namespace` in query item responses by default |
+| `KONGODB_STRICT_MUTATIONS_OPERATORS` | `false` | `true` makes unknown/invalid Mutation Operators (`$inc`, `$push`, etc.) return an error instead of silently no-op'ing |
 
 ### Data Lifecycle
 
@@ -1380,14 +1366,6 @@ Idle TTL reaper checks do not publish snapshots. A reaper checkpoint is created 
 | `KONGODB_BACKUP_RETENTION_DAYS` | `30` | How long backups are retained |
 | `KONGODB_EXPORT_PATH` | `./exports` | Local path or full `s3://bucket/prefix` for generated JSONL exports |
 | `KONGODB_JOB_RETENTION_DAYS` | `30` | Shared retention for terminal import/export job history |
-
-### Legacy Field Aliases
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `KONGODB_ENABLE_LEGACY_ALIASES` | `false` | Enable legacy request/response alias normalization |
-| `KONGODB_LEGACY_ALIASES_IMPORT_PK` | `_key:_id` | Request/import primary-key alias map (`from:to,...`) |
-| `KONGODB_LEGACY_ALIASES_RESPONSE` | `_key:_id` | Response alias projection map (`alias:canonical,...`) |
 
 *(Full variable list with inline comments lives in `kongo.env`.)*
 
@@ -1569,10 +1547,10 @@ KONGODB_S3_SECRET_KEY=...
 ```json
 {
   "db": "myapp/main",
-  "operation": "get",
-  "namespace": "users",
+  "operation": "query",
+  "namespace": "*",
   "payload": {
-    "ids": ["u1", "u2"]
+    "filter": { "_id": { "$in": ["u1", "u2"] } }
   }
 }
 ```
@@ -1597,7 +1575,7 @@ KONGODB_S3_SECRET_KEY=...
 ```json
 {
   "db": "myapp/main",
-  "operation": "search",
+  "operation": "query",
   "namespace": "users",
   "payload": {
     "search": "ada",
@@ -1607,6 +1585,27 @@ KONGODB_S3_SECRET_KEY=...
 ```
 
 ### Lifecycle
+
+Attach a durable conditional transition to a singular write. The condition is checked against current state when the transition becomes due:
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "insert",
+  "namespace": "invitations",
+  "payload": {
+    "data": {"email": "user@example.com", "status": "pending"},
+    "lifecycle": {
+      "name": "expire_invitation",
+      "after_seconds": 86400,
+      "when": {"accepted_at": {"$exists": false}},
+      "update": {"status": "expired", "expired_at": {"$ts_now": true}}
+    }
+  }
+}
+```
+
+Manage transitions with `schedule_transition`, `cancel_transition`, `get_transition`, `list_transitions`, and `retry_transition`. Lifecycle supports one object or an array on singular `insert`, explicit-ID `update`, and `upsert` with `max_docs:1`. Full execution, status, TTL, and interaction rules are in `DOCUMENTATION.md`.
 
 ```json
 {

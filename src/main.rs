@@ -94,9 +94,6 @@ async fn main() {
         cfg.response.include_namespace,
         matches!(cfg.json_storage.format, JsonStorageFormat::Jsonb),
         cfg.query.default_limit,
-        cfg.legacy_aliases.enabled,
-        cfg.legacy_aliases.import_pk.clone(),
-        cfg.legacy_aliases.response.clone(),
         cfg.query_lookup.max_depth,
         cfg.query_lookup.uncapped_override_enabled,
         cfg.query_lookup.max_concurrency,
@@ -238,6 +235,14 @@ async fn main() {
                     error_streak = (error_streak + 1).min(6);
                     eprintln!("reaper error: {err}");
                 }
+            }
+            match crate::service::dispatcher::process_document_transitions_tick(&reaper_state).await
+            {
+                Ok(processed) if processed > 0 => {
+                    eprintln!("document-lifecycle processed={processed}")
+                }
+                Ok(_) => {}
+                Err(err) => eprintln!("document-lifecycle error: {err}"),
             }
             if unix_now_secs().saturating_sub(last_temp_cleanup_at) >= temp_cleanup_interval_secs {
                 match reaper_manager

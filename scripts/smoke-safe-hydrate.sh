@@ -122,8 +122,8 @@ fi
 echo "[2/7] create db + seed stable row" | tee -a "$LOG_FILE"
 CREATE="$(api_post "{\"db\":\"$DB\",\"operation\":\"create_db\",\"payload\":{}}")"
 assert_contains "$CREATE" '"status":"success"' "create should succeed"
-SET_ROW="$(api_post "{\"db\":\"$DB\",\"operation\":\"set\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"_id\":\"safe-hydrate-row\",\"name\":\"before-corrupt-restore\"}}}")"
-assert_contains "$SET_ROW" '"status":"success"' "set should succeed"
+SET_ROW="$(api_post "{\"db\":\"$DB\",\"operation\":\"insert\",\"namespace\":\"$NS\",\"payload\":{\"data\":{\"_id\":\"safe-hydrate-row\",\"name\":\"before-corrupt-restore\"}}}")"
+assert_contains "$SET_ROW" '"status":"success"' "insert should succeed"
 
 echo "[3/7] sync snapshot to remote" | tee -a "$LOG_FILE"
 SYNC="$(api_post "{\"db\":\"$DB\",\"operation\":\"sync_db\",\"payload\":{}}")"
@@ -175,8 +175,8 @@ assert_contains "$RESTORE" '"status":"error"' "restore_snapshot should fail with
 assert_contains "$RESTORE" 'quick_check' "restore failure should come from quick_check gate"
 
 echo "[6/7] verify local row still exists (anti-wipe)" | tee -a "$LOG_FILE"
-GET_ROW="$(api_post "{\"db\":\"$DB\",\"operation\":\"get\",\"payload\":{\"id\":\"safe-hydrate-row\"}}")"
-assert_contains "$GET_ROW" '"status":"success"' "get should succeed after failed restore"
+GET_ROW="$(api_post "{\"db\":\"$DB\",\"operation\":\"query\",\"namespace\":\"*\",\"payload\":{\"filter\":{\"_id\":\"safe-hydrate-row\"}}}")"
+assert_contains "$GET_ROW" '"status":"success"' "query should succeed after failed restore"
 assert_contains "$GET_ROW" '"count":1' "row should still exist after failed restore"
 assert_contains "$GET_ROW" 'before-corrupt-restore' "row value should remain unchanged"
 

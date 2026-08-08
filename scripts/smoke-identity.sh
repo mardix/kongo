@@ -8,7 +8,7 @@ PORT="${KONGODB_PORT:-18092}"
 SMOKE_ROOT="${KONGODB_SMOKE_ROOT:-./.smoke/identity}"
 DATA_DIR="${KONGODB_DATA_DIR:-${SMOKE_ROOT}/data}"
 LOG_FILE="${KONGODB_SMOKE_LOG:-${SMOKE_ROOT}/logs/smoke-identity.log}"
-BIN="${KONGODB_BIN:-./target/debug/kongodb}"
+BIN="${KONGODB_BIN:-./target/debug/kongo}"
 BASE_URL="http://127.0.0.1:${PORT}"
 BASE_PATH_RAW="${KONGODB_BASE_PATH:-}"
 BASE_PATH="/${BASE_PATH_RAW#/}"
@@ -81,8 +81,8 @@ assert_contains "$CREATE_USER" '"requires_password_change":true' "user_create sh
 USER_ID="$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' <<<"$CREATE_USER")"
 [[ -n "$USER_ID" ]] || { echo "failed to extract created user id" >&2; exit 1; }
 
-LIST_USERS="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"identity/main","operation":"user_list","payload":{}}')"
-assert_contains "$LIST_USERS" '"requires_password_change":true' "user_list should return the enabled flag"
+LIST_USERS="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"identity/main","operation":"user_query","payload":{}}')"
+assert_contains "$LIST_USERS" '"requires_password_change":true' "user_query should return the enabled flag"
 
 echo "[6/7] clear password-change requirement"
 UPDATE_USER="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"identity/main\",\"operation\":\"user_update\",\"payload\":{\"user_id\":\"$USER_ID\",\"requires_password_change\":false}}")"

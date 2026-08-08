@@ -199,7 +199,7 @@ function buildSearchRequest(db, form, parsedFilter) {
   const filter = parsedFilter || (fallbackFilter && typeof fallbackFilter === 'object' && !Array.isArray(fallbackFilter) ? fallbackFilter : {});
   return {
     db,
-    operation: 'search',
+    operation: 'query',
     namespace: form.namespace,
     payload: compact({
       search: form.search.trim(),

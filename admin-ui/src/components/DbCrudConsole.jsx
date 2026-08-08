@@ -12,7 +12,7 @@ import { FullTextSearchPanel } from './FullTextSearchPanel.jsx';
 import { AuditLogsPanel } from './AuditLogsPanel.jsx';
 import { DocumentUiEditor } from './DocumentUiEditor.jsx';
 
-const operations = ['query', 'insert', 'update', 'delete', 'count', 'aggregate', 'search', 'custom'];
+const operations = ['query', 'insert', 'update', 'delete', 'count', 'aggregate', 'custom'];
 const dbTabs = [
   { id: 'overview', label: 'Overview' },
   { id: 'crud', label: 'DocumentDB' },
@@ -1179,27 +1179,44 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-            <DbBreadcrumb path={folderPath} onOpen={openFolder} disabled={Boolean(term)} />
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <span>{refreshing ? 'Refreshing...' : inventoryMeta?.cached_at ? `Cached ${formatRelativeTime(inventoryMeta.cached_at)}` : 'No cache yet'}</span>
-              {inventoryMeta?.host_key ? <span className="hidden rounded-full bg-white px-2 py-1 font-mono text-[10px] text-slate-400 md:inline">{inventoryMeta.host_key}</span> : null}
-            </div>
-          </div>
-
-          {!term && folderView.folders.length ? (
-            <section>
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Folders</div>
-              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                {folderView.folders.map((folder) => (
-                  <button key={folder.path} type="button" onClick={() => openFolder(folder.path)} className="rounded-xl border border-slate-200 bg-white px-3 py-3 text-left transition hover:border-primary/40 hover:bg-primary/5">
-                    <div className="truncate font-mono text-sm font-semibold text-slate-950">{folder.name}/</div>
-                    <div className="mt-1 text-xs text-slate-500">{folder.count} database{folder.count === 1 ? '' : 's'}</div>
-                  </button>
-                ))}
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => openFolder(parentDbFolder(folderPath))}
+                  disabled={!folderPath || Boolean(term)}
+                  className="btn-label shrink-0"
+                  title="Open parent folder"
+                >
+                  Up
+                </button>
+                <DbBreadcrumb path={folderPath} onOpen={openFolder} disabled={Boolean(term)} />
               </div>
-            </section>
-          ) : null}
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <span>{refreshing ? 'Refreshing...' : inventoryMeta?.cached_at ? `Cached ${formatRelativeTime(inventoryMeta.cached_at)}` : 'No cache yet'}</span>
+                {inventoryMeta?.host_key ? <span className="hidden rounded-full bg-white px-2 py-1 font-mono text-[10px] text-slate-400 md:inline">{inventoryMeta.host_key}</span> : null}
+              </div>
+            </div>
+
+            {!term && folderView.folders.length ? (
+              <section className="border-b border-slate-200">
+                <div className="grid grid-cols-[minmax(0,1fr)_100px_90px] items-center gap-3 bg-slate-100/80 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 md:grid-cols-[minmax(0,1fr)_140px_140px_90px]">
+                  <span>Name</span>
+                  <span>Type</span>
+                  <span className="hidden md:block">Contents</span>
+                  <span className="text-right">Action</span>
+                </div>
+                {folderView.folders.map((folder) => (
+                  <FolderBrowserRow key={folder.path} folder={folder} onOpen={() => openFolder(folder.path)} />
+                ))}
+              </section>
+            ) : null}
+
+            {!term && !folderView.folders.length && !folderView.dbs.length ? (
+              <div className="px-4 py-5 text-sm text-slate-500">This folder is empty.</div>
+            ) : null}
+          </div>
 
           <section className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1214,17 +1231,17 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
               </div>
             </div>
             {pageItems.length ? (
-              <div className="overflow-auto rounded-xl border border-slate-200">
-                <table className="w-full min-w-[900px] border-separate border-spacing-0 text-sm">
-                  <thead>
-                    <tr>
-                      {['db path', 'size', 'loaded', 'local', 's3', 'action'].map((head) => <th key={head} className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">{head}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pageItems.map((db, idx) => <DbTableRow key={`${dbLabel(db)}-${idx}`} db={db} onOpen={() => selectDb(dbLabel(db))} />)}
-                  </tbody>
-                </table>
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                <div className="hidden grid-cols-[minmax(0,1fr)_100px_170px_110px_70px] items-center gap-3 border-b border-slate-200 bg-slate-100/80 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 md:grid">
+                  <span>Database</span>
+                  <span>Size</span>
+                  <span>Storage</span>
+                  <span>Runtime</span>
+                  <span className="text-right">Action</span>
+                </div>
+                {pageItems.map((db, idx) => (
+                  <DbBrowserRow key={`${dbLabel(db)}-${idx}`} db={db} onOpen={() => selectDb(dbLabel(db))} />
+                ))}
               </div>
             ) : <EmptyCards message={!term && folderView.folders.length ? 'Open a folder above to browse its databases.' : dbs.length ? 'No databases match this search or filter.' : 'No DBs found yet. Create one or refresh the inventory.'} />}
             <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
@@ -1306,26 +1323,44 @@ function DbRow({ db, onOpen }) {
   );
 }
 
-function DbTableRow({ db, onOpen }) {
-  return (
-    <tr className="odd:bg-white even:bg-slate-50">
-      <td className="border-b border-slate-200 px-3 py-2">
-        <div className="truncate font-mono text-xs font-semibold text-slate-950">{dbLabel(db)}</div>
-      </td>
-      <td className="border-b border-slate-200 px-3 py-2 font-mono text-xs text-slate-700">{formatBytes(db.local_size_bytes ?? db.size_bytes)}</td>
-      <td className="border-b border-slate-200 px-3 py-2"><StatusPill value={truthy(db.loaded)} /></td>
-      <td className="border-b border-slate-200 px-3 py-2"><StatusPill value={truthy(db.on_local)} /></td>
-      <td className="border-b border-slate-200 px-3 py-2"><StatusPill value={truthy(db.on_s3)} /></td>
-      <td className="border-b border-slate-200 px-3 py-2 text-right"><button type="button" onClick={onOpen} className="btn-label-secondary">Open</button></td>
-    </tr>
-  );
-}
+function DbBrowserRow({ db, onOpen }) {
+  const path = dbLabel(db);
+  const name = path.split('/').filter(Boolean).pop() || path;
+  const loaded = isLoadedDb(db);
+  const onLocal = truthy(db.on_local);
+  const onS3 = truthy(db.on_s3);
 
-function StatusPill({ value }) {
   return (
-    <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${value ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
-      {value ? 'yes' : 'no'}
-    </span>
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-slate-100 px-3 py-3 text-left transition last:border-b-0 hover:bg-sky-50/70 md:grid-cols-[minmax(0,1fr)_100px_170px_110px_70px]"
+    >
+      <span className="flex min-w-0 items-center gap-2.5">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-[10px] font-bold text-sky-800 transition group-hover:bg-sky-200">DB</span>
+        <span className="min-w-0">
+          <span className="block truncate font-mono text-sm font-semibold text-slate-950 group-hover:text-primary">{name}</span>
+          <span className="block truncate font-mono text-[11px] text-slate-400">{path}</span>
+        </span>
+      </span>
+      <span className="hidden font-mono text-xs text-slate-600 md:block">{formatBytes(db.local_size_bytes ?? db.size_bytes)}</span>
+      <span className="hidden flex-wrap items-center gap-1.5 md:flex">
+        <span className={`badge ${onLocal ? 'badge-info' : 'badge-muted'}`}>Local</span>
+        <span className={`badge ${onS3 ? 'bg-indigo-50 text-indigo-700' : 'badge-muted'}`}>S3</span>
+      </span>
+      <span className="hidden md:block">
+        <span className={`badge ${loaded ? 'badge-ok' : 'badge-muted'}`}>{loaded ? 'Loaded' : 'Available'}</span>
+      </span>
+      <span className="flex items-center justify-end gap-1 text-xs font-semibold text-primary">
+        Open <span aria-hidden="true">›</span>
+      </span>
+      <span className="col-span-2 flex flex-wrap items-center gap-1.5 pl-11 md:hidden">
+        <span className="font-mono text-[11px] text-slate-500">{formatBytes(db.local_size_bytes ?? db.size_bytes)}</span>
+        {onLocal ? <span className="badge badge-info">Local</span> : null}
+        {onS3 ? <span className="badge bg-indigo-50 text-indigo-700">S3</span> : null}
+        <span className={`badge ${loaded ? 'badge-ok' : 'badge-muted'}`}>{loaded ? 'Loaded' : 'Available'}</span>
+      </span>
+    </button>
   );
 }
 
@@ -1333,7 +1368,8 @@ function DbBreadcrumb({ path, onOpen, disabled }) {
   const parts = path ? path.split('/').filter(Boolean) : [];
   return (
     <div className={`flex min-w-0 flex-wrap items-center gap-1 text-xs ${disabled ? 'opacity-50' : ''}`}>
-      <button type="button" disabled={disabled} onClick={() => onOpen('')} className="rounded-md bg-white px-2 py-1 font-semibold text-slate-700 hover:bg-slate-100">All</button>
+      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Path</span>
+      <button type="button" disabled={disabled} onClick={() => onOpen('')} className="rounded-md bg-white px-2 py-1 font-semibold text-slate-700 hover:bg-slate-100">All databases</button>
       {parts.map((part, idx) => {
         const nextPath = parts.slice(0, idx + 1).join('/');
         return (
@@ -1345,6 +1381,27 @@ function DbBreadcrumb({ path, onOpen, disabled }) {
       })}
       {disabled ? <span className="ml-2 text-slate-500">folder navigation hidden during search</span> : null}
     </div>
+  );
+}
+
+function FolderBrowserRow({ folder, onOpen }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group grid w-full grid-cols-[minmax(0,1fr)_100px_90px] items-center gap-3 border-t border-slate-100 px-3 py-2.5 text-left first:border-t-0 transition hover:bg-amber-50/60 md:grid-cols-[minmax(0,1fr)_140px_140px_90px]"
+    >
+      <span className="flex min-w-0 items-center gap-2.5">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-100 text-xs font-bold text-amber-800">/</span>
+        <span className="min-w-0">
+          <span className="block truncate font-mono text-sm font-semibold text-slate-950 group-hover:text-amber-900">{folder.name}</span>
+          <span className="block truncate text-[11px] text-slate-400">/{folder.path}</span>
+        </span>
+      </span>
+      <span className="text-xs font-medium text-slate-600">Folder</span>
+      <span className="hidden text-xs text-slate-500 md:block">{folder.count} database{folder.count === 1 ? '' : 's'}</span>
+      <span className="text-right text-xs font-semibold text-primary">Open</span>
+    </button>
   );
 }
 
@@ -1454,28 +1511,24 @@ function DocumentDbHomeToolbar({ namespaces, selected, onSelect, onAdd, onRefres
 
   return (
     <section className="panel px-4 py-3">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div className="min-w-0 flex-1">
-          <div className="mb-2">
-            <h3 className="text-sm font-semibold text-slate-950">Latest Documents</h3>
-            <p className="text-xs text-slate-500">Browse the selected namespace ordered by creation time, newest first.</p>
-          </div>
-          <label className="block max-w-xl">
-            <span className="field-label">Namespace</span>
-            <select value={selected || ''} onChange={(event) => onSelect(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center">
+        <label className="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-row sm:items-center">
+          <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-slate-500">Namespaces:</span>
+          <span className="min-w-0 flex-1 sm:max-w-xl">
+            <select value={selected || ''} onChange={(event) => onSelect(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
               {!options.length ? <option value="">No namespaces available</option> : null}
               {options.length && !selected ? <option value="">Select a namespace</option> : null}
               {options.map(({ name }) => <option key={name} value={name}>{name}</option>)}
             </select>
-          </label>
-          {selected ? (
-            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
+          </span>
+          {selected && (count !== undefined || size !== undefined) ? (
+            <span className="flex shrink-0 items-center gap-2 text-[11px] text-slate-500">
               {count !== undefined ? <span>{Number(count).toLocaleString()} documents</span> : null}
               {size !== undefined ? <span>{formatBytes(Number(size))}</span> : null}
-            </div>
+            </span>
           ) : null}
-        </div>
-        <div className="flex flex-wrap gap-2">
+        </label>
+        <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">
           <button type="button" onClick={onRefresh} disabled={!selected} className="btn-secondary">Refresh</button>
           <button type="button" onClick={onAdd} className="btn-primary">Add Entry</button>
         </div>
@@ -1550,7 +1603,7 @@ function FileCatalogPanel({ db, gateway, runStatusCall, showToast }) {
       const started = performance.now();
       const data = await gateway(nextRequest);
       const elapsed = performance.now() - started;
-      if (nextRequest.operation === 'file_list') {
+      if (nextRequest.operation === 'file_query') {
         setListResponse(data);
         setListDurationMs(elapsed);
       } else {
@@ -2065,7 +2118,7 @@ function emptyFileForm(action = 'create') {
 function buildFileListRequest(db, query) {
   return {
     db,
-    operation: 'file_list',
+    operation: 'file_query',
     payload: cleanPayload({
       search: query.search,
       bucket: query.bucket,
@@ -2343,7 +2396,7 @@ function RequestHistory({ items, onUse, onClear }) {
 function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestText, page, pageSize, selectedIds, onSelectedIds, onPage, onPageSize, onSort, onRefresh, onReset, onView, onBatch }) {
   const tableRows = rows.map((row) => flattenRow(normalizeDocumentForDisplay(row)));
   const { rows: flattenedRows, keys } = rowColumns(tableRows);
-  const visibleKeys = prioritizeDocumentColumns(keys.filter((key) => key !== '_key')).slice(0, 18);
+  const visibleKeys = prioritizeDocumentColumns(keys).slice(0, 18);
   const [hiddenColumns, setHiddenColumns] = useState([]);
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [jsonOpen, setJsonOpen] = useState(false);
@@ -3020,7 +3073,7 @@ function IdentityPanel({ db, gateway, runStatusCall, showToast }) {
       const started = performance.now();
       const data = await gateway(nextRequest);
       const elapsed = performance.now() - started;
-      if (nextRequest.operation === 'user_list') {
+      if (nextRequest.operation === 'user_query') {
         setListResponse(data);
         setListDurationMs(elapsed);
         setSelectedUserIds([]);
@@ -3145,7 +3198,7 @@ function IdentityPanel({ db, gateway, runStatusCall, showToast }) {
     if (!hasSelector) return showToast('Enter an id, email, username, name/phone, or provider identity', true);
     const data = await runIdentityRequest(request);
     if (!data) return;
-    if (request.operation === 'user_list') {
+    if (request.operation === 'user_query') {
       setGetHasResults(true);
       return;
     }
@@ -3160,7 +3213,7 @@ function IdentityPanel({ db, gateway, runStatusCall, showToast }) {
     setUserQuery((prev) => ({ ...prev, perPage: String(perPage) }));
     await runIdentityRequest({
       db,
-      operation: 'user_list',
+      operation: 'user_query',
       payload: { search, page: Number(page), per_page: Number(perPage) }
     });
     setGetHasResults(true);
@@ -3845,7 +3898,7 @@ function buildIdentityRequest(db, mode, userAction, providerAction, userForm, st
   if (mode === 'get') {
     const search = userFormValue(userForm.lookup_search);
     if (search) {
-      return { db, operation: 'user_list', payload: { search, page: 1, per_page: 25 } };
+      return { db, operation: 'user_query', payload: { search, page: 1, per_page: 25 } };
     }
     return {
       db,
@@ -3953,7 +4006,7 @@ function buildIdentityRequest(db, mode, userAction, providerAction, userForm, st
 function buildIdentityListRequest(db, userQuery) {
   return {
     db,
-    operation: 'user_list',
+    operation: 'user_query',
     payload: cleanPayload({
       search: userFormValue(userQuery.search),
       status: userFormValue(userQuery.status),
@@ -4011,7 +4064,7 @@ function SQLiteDbPanel({ db, gateway, runStatusCall, showToast }) {
   async function refreshTables() {
     if (!db) return;
     await runStatusCall(async () => {
-      const { data, durationMs: ms } = await timed({ db, operation: 'list_tables', payload: {} });
+      const { data, durationMs: ms } = await timed({ db, operation: 'sql_list_tables', payload: {} });
       const items = extractArray(data, ['data.items', 'items']);
       setTables(items);
       setResponse(data);
@@ -4057,7 +4110,7 @@ function SQLiteDbPanel({ db, gateway, runStatusCall, showToast }) {
     if (!name) return;
     setActiveTable(name);
     await runStatusCall(async () => {
-      const { data, durationMs: ms } = await timed({ db, operation: 'get_table_schema', payload: { table: name } });
+      const { data, durationMs: ms } = await timed({ db, operation: 'sql_get_table_schema', payload: { table: name } });
       setResponse(data);
       setDurationMs(ms);
       return data;
@@ -4083,7 +4136,7 @@ function SQLiteDbPanel({ db, gateway, runStatusCall, showToast }) {
   async function loadTableSchema(table) {
     const name = table || activeTable;
     if (!name) return [];
-    const { data } = await timed({ db, operation: 'get_table_schema', payload: { table: name } });
+    const { data } = await timed({ db, operation: 'sql_get_table_schema', payload: { table: name } });
     return normalizeTableSchema(extractArray(data, ['data.columns', 'data.items', 'columns', 'items']));
   }
 
@@ -4955,6 +5008,12 @@ function buildDbFolderView(dbs, folderPath) {
   };
 }
 
+function parentDbFolder(folderPath) {
+  const parts = String(folderPath || '').split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
+}
+
 function dbMatchesFilter(db, filter) {
   if (filter === 'loaded') return isLoadedDb(db);
   if (filter === 'not_loaded') return !isLoadedDb(db);
@@ -5250,7 +5309,6 @@ function normalizeDocumentForDisplay(row) {
   if (id && !out._id) out._id = id;
   if (userId && !out._user_id) out._user_id = userId;
   if (namespace && !out._namespace) out._namespace = namespace;
-  delete out._key;
   return out;
 }
 

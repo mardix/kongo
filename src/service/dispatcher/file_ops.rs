@@ -65,7 +65,7 @@ async fn file_get(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<G
     Ok(GatewayResponse::ok(Some(json!({"item": item}))))
 }
 
-async fn file_list(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<GatewayResponse> {
+async fn file_query(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<GatewayResponse> {
     let payload = req.payload;
     let (limit, offset, page) = resolve_pagination_args(&payload, 25)?;
     let limit = limit.clamp(1, 200);
@@ -124,12 +124,12 @@ async fn file_list(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<
             page_binds,
         )
         .await
-        .map_err(|e| AppError::Internal(format!("file_list query failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("file_query query failed: {e}")))?;
     let mut items = Vec::<Value>::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("file_list row read failed: {e}")))?
+        .map_err(|e| AppError::Internal(format!("file_query row read failed: {e}")))?
     {
         items.push(file_from_row(&row)?);
     }
@@ -268,14 +268,14 @@ async fn file_count(conn: &libsql::Connection, where_clause: &str, binds: Vec<li
     let mut rows = conn
         .query(&format!("SELECT COUNT(*) FROM __kdb_files WHERE {where_clause}"), binds)
         .await
-        .map_err(|e| AppError::Internal(format!("file_list count failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("file_query count failed: {e}")))?;
     let row = rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("file_list count row failed: {e}")))?
-        .ok_or_else(|| AppError::Internal("file_list count returned no row".to_string()))?;
+        .map_err(|e| AppError::Internal(format!("file_query count row failed: {e}")))?
+        .ok_or_else(|| AppError::Internal("file_query count returned no row".to_string()))?;
     row.get::<i64>(0)
-        .map_err(|e| AppError::Internal(format!("file_list count decode failed: {e}")))
+        .map_err(|e| AppError::Internal(format!("file_query count decode failed: {e}")))
 }
 
 fn file_select() -> &'static str {

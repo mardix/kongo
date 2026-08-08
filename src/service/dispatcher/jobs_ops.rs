@@ -137,16 +137,7 @@ async fn import_jsonl(
     let ignore_input_id = payload.ignore_input_id.unwrap_or(false);
     let allow_system_timestamps = payload.allow_system_timestamps.unwrap_or(false);
     let resumable = payload.resumable.unwrap_or(false);
-    let alias_import_pk = parse_alias_import_pk_override(payload.alias_import_pk.as_ref())?;
     let drop_keys = parse_drop_keys_override(payload.drop_keys.as_ref())?;
-    let alias_import_pk_json = if alias_import_pk.is_empty() {
-        None
-    } else {
-        Some(
-            serde_json::to_string(&alias_import_pk)
-                .map_err(|e| AppError::BadRequest(format!("invalid alias_import_pk: {e}")))?,
-        )
-    };
     let drop_keys_json = if drop_keys.is_empty() {
         None
     } else {
@@ -175,7 +166,6 @@ async fn import_jsonl(
                    AND collection = ? AND source_hash = ? AND on_conflict = ? AND batch_size = ?
                    AND ignore_input_id = ?
                    AND allow_system_timestamps = ?
-                   AND COALESCE(alias_import_pk,'') = COALESCE(?, '')
                    AND COALESCE(drop_keys_json,'') = COALESCE(?, '')
                    AND status IN ('queued','running','retrying','completed')
                  ORDER BY created_at DESC LIMIT 1",
@@ -186,7 +176,6 @@ async fn import_jsonl(
                     batch_size,
                     if ignore_input_id { 1 } else { 0 },
                     if allow_system_timestamps { 1 } else { 0 },
-                    alias_import_pk_json.clone(),
                     drop_keys_json.clone()
                 ],
             )
@@ -214,14 +203,13 @@ async fn import_jsonl(
     let job_id = Uuid::new_v4().simple().to_string();
     conn.execute(
         "INSERT INTO __kdb_jobs (
-            job_id, job_type, collection, source_path, source_hash, alias_import_pk, drop_keys_json, on_conflict, ignore_input_id, allow_system_timestamps, batch_size, resumable, status
-         ) VALUES (?, 'import_jsonl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')",
+            job_id, job_type, collection, source_path, source_hash, drop_keys_json, on_conflict, ignore_input_id, allow_system_timestamps, batch_size, resumable, status
+         ) VALUES (?, 'import_jsonl', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')",
         libsql::params![
             job_id.clone(),
             collection.clone(),
             source_path.clone(),
             source_hash.clone(),
-            alias_import_pk_json.clone(),
             drop_keys_json.clone(),
             on_conflict.clone(),
             if ignore_input_id { 1 } else { 0 },
@@ -239,7 +227,6 @@ async fn import_jsonl(
         "collection": collection,
         "source_path": source_path,
         "source_hash": source_hash,
-        "alias_import_pk": alias_import_pk,
         "drop_keys": drop_keys,
         "on_conflict": on_conflict,
         "ignore_input_id": ignore_input_id,
@@ -1447,8 +1434,8 @@ async fn process_next_import_job_for_db(
         .query(
             "SELECT job_id, collection, source_path, on_conflict, batch_size, resumable,
                     ignore_input_id, allow_system_timestamps,
-                    last_line_no, last_byte_offset, read_count, inserted_count, updated_count, skipped_count, error_count, source_hash
-                    , alias_import_pk, drop_keys_json
+                    last_line_no, last_byte_offset, read_count, inserted_count, updated_count, skipped_count, error_count, source_hash,
+                    drop_keys_json
              FROM __kdb_jobs
              WHERE status IN ('queued','retrying')
                AND job_type = 'import_jsonl'
@@ -1514,13 +1501,9 @@ async fn process_next_import_job_for_db(
     let source_hash: Option<String> = row
         .get(15)
         .map_err(|e| AppError::Internal(format!("import worker decode failed: {e}")))?;
-    let alias_import_pk_json: Option<String> = row
+    let drop_keys_json: Option<String> = row
         .get(16)
         .map_err(|e| AppError::Internal(format!("import worker decode failed: {e}")))?;
-    let drop_keys_json: Option<String> = row
-        .get(17)
-        .map_err(|e| AppError::Internal(format!("import worker decode failed: {e}")))?;
-    let alias_import_pk = parse_alias_import_pk_json(alias_import_pk_json.as_deref())?;
     let drop_keys = parse_drop_keys_json(drop_keys_json.as_deref())?;
 
     let claimed = conn
@@ -1582,7 +1565,6 @@ async fn process_next_import_job_for_db(
                     &on_conflict,
                     &temp_path,
                     batch_cap,
-                    &alias_import_pk,
                     &drop_keys,
                     ignore_input_id == 1,
                     allow_system_timestamps,
@@ -1607,7 +1589,6 @@ async fn process_next_import_job_for_db(
                     &on_conflict,
                     &source_path,
                     batch_cap,
-                    &alias_import_pk,
                     &drop_keys,
                     ignore_input_id == 1,
                     allow_system_timestamps,
@@ -1639,7 +1620,6 @@ async fn process_next_import_job_for_db(
                 &on_conflict,
                 &source_for_parse,
                 batch_cap,
-                &alias_import_pk,
                 &drop_keys,
                 ignore_input_id == 1,
                 allow_system_timestamps,
@@ -1763,7 +1743,6 @@ async fn process_local_jsonl_file(
     on_conflict: &str,
     source_path: &str,
     batch_cap: usize,
-    alias_import_pk: &[(String, String)],
     drop_keys: &[String],
     ignore_input_id: bool,
     allow_system_timestamps: bool,
@@ -1813,7 +1792,6 @@ async fn process_local_jsonl_file(
         enqueue_import_line(
             line,
             batch_docs,
-            alias_import_pk,
             drop_keys,
             ignore_input_id,
         )?;
@@ -1856,7 +1834,6 @@ async fn process_s3_jsonl_stream(
     on_conflict: &str,
     source_path: &str,
     batch_cap: usize,
-    alias_import_pk: &[(String, String)],
     drop_keys: &[String],
     ignore_input_id: bool,
     allow_system_timestamps: bool,
@@ -1897,7 +1874,6 @@ async fn process_s3_jsonl_stream(
             enqueue_import_line(
                 line,
                 batch_docs,
-                alias_import_pk,
                 drop_keys,
                 ignore_input_id,
             )?;
@@ -1938,7 +1914,6 @@ async fn process_s3_jsonl_stream(
         enqueue_import_line(
             line,
             batch_docs,
-            alias_import_pk,
             drop_keys,
             ignore_input_id,
         )?;
@@ -2022,7 +1997,6 @@ fn decode_jsonl_line<'a>(line_bytes: &'a [u8], line_no: i64) -> AppResult<&'a st
 fn enqueue_import_line(
     line: &str,
     batch_docs: &mut Vec<Value>,
-    alias_import_pk: &[(String, String)],
     drop_keys: &[String],
     ignore_input_id: bool,
 ) -> AppResult<()> {
@@ -2038,7 +2012,7 @@ fn enqueue_import_line(
         ));
     }
     expand_kdb_macros_in_value(&mut doc)?;
-    apply_import_aliases_and_drop_keys(&mut doc, alias_import_pk, drop_keys)?;
+    apply_import_drop_keys(&mut doc, drop_keys)?;
     if ignore_input_id {
         scrub_import_identity_keys(&mut doc)?;
     }
@@ -2053,31 +2027,10 @@ fn scrub_import_identity_keys(doc: &mut Value) -> AppResult<()> {
         .ok_or_else(|| AppError::BadRequest("import row must be an object".to_string()))?;
     obj.remove("_id");
     obj.remove("id");
-    obj.remove("_key");
     Ok(())
 }
 
-fn apply_import_aliases_and_drop_keys(
-    doc: &mut Value,
-    alias_import_pk: &[(String, String)],
-    drop_keys: &[String],
-) -> AppResult<()> {
-    let obj = doc
-        .as_object_mut()
-        .ok_or_else(|| AppError::BadRequest("import row must be an object".to_string()))?;
-
-    for (from, to) in alias_import_pk {
-        if from.trim().is_empty() || to.trim().is_empty() || from == to {
-            continue;
-        }
-        let to_exists = obj.contains_key(to);
-        if let Some(v) = obj.remove(from) {
-            if !to_exists {
-                obj.insert(to.clone(), v);
-            }
-        }
-    }
-
+fn apply_import_drop_keys(doc: &mut Value, drop_keys: &[String]) -> AppResult<()> {
     for path in drop_keys {
         if path == "_id" {
             return Err(AppError::BadRequest(
@@ -2110,97 +2063,6 @@ fn drop_path(root: &mut Value, path: &str) {
     }
 }
 
-fn parse_alias_import_pk_override(raw: Option<&Value>) -> AppResult<Vec<(String, String)>> {
-    let Some(raw) = raw else {
-        return Ok(Vec::new());
-    };
-    match raw {
-        Value::String(s) => parse_alias_pairs_csv(s),
-        Value::Object(map) => {
-            let mut out = Vec::<(String, String)>::new();
-            for (from, to_val) in map {
-                let to = to_val.as_str().ok_or_else(|| {
-                    AppError::BadRequest(
-                        "alias_import_pk object values must be strings".to_string(),
-                    )
-                })?;
-                if from.trim().is_empty() || to.trim().is_empty() {
-                    continue;
-                }
-                out.push((from.trim().to_string(), to.trim().to_string()));
-            }
-            Ok(out)
-        }
-        Value::Array(items) => {
-            let mut out = Vec::<(String, String)>::new();
-            for item in items {
-                match item {
-                    Value::Object(obj) => {
-                        let from = obj.get("from").and_then(Value::as_str).ok_or_else(|| {
-                            AppError::BadRequest(
-                                "alias_import_pk array object needs from/to".to_string(),
-                            )
-                        })?;
-                        let to = obj.get("to").and_then(Value::as_str).ok_or_else(|| {
-                            AppError::BadRequest(
-                                "alias_import_pk array object needs from/to".to_string(),
-                            )
-                        })?;
-                        if !from.trim().is_empty() && !to.trim().is_empty() {
-                            out.push((from.trim().to_string(), to.trim().to_string()));
-                        }
-                    }
-                    Value::Array(pair) if pair.len() == 2 => {
-                        let from = pair[0].as_str().ok_or_else(|| {
-                            AppError::BadRequest(
-                                "alias_import_pk pair[0] must be string".to_string(),
-                            )
-                        })?;
-                        let to = pair[1].as_str().ok_or_else(|| {
-                            AppError::BadRequest(
-                                "alias_import_pk pair[1] must be string".to_string(),
-                            )
-                        })?;
-                        if !from.trim().is_empty() && !to.trim().is_empty() {
-                            out.push((from.trim().to_string(), to.trim().to_string()));
-                        }
-                    }
-                    _ => {
-                        return Err(AppError::BadRequest(
-                            "alias_import_pk array entries must be {from,to} or [from,to]"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            Ok(out)
-        }
-        _ => Err(AppError::BadRequest(
-            "alias_import_pk must be string, object, or array".to_string(),
-        )),
-    }
-}
-
-fn parse_alias_pairs_csv(raw: &str) -> AppResult<Vec<(String, String)>> {
-    let mut out = Vec::<(String, String)>::new();
-    for pair in raw.split(',') {
-        let p = pair.trim();
-        if p.is_empty() {
-            continue;
-        }
-        let mut parts = p.splitn(2, ':');
-        let from = parts.next().unwrap_or_default().trim();
-        let to = parts.next().unwrap_or_default().trim();
-        if from.is_empty() || to.is_empty() {
-            return Err(AppError::BadRequest(
-                "alias_import_pk csv format must be from:to,from2:to2".to_string(),
-            ));
-        }
-        out.push((from.to_string(), to.to_string()));
-    }
-    Ok(out)
-}
-
 fn parse_drop_keys_override(raw: Option<&Vec<String>>) -> AppResult<Vec<String>> {
     let Some(keys) = raw else {
         return Ok(Vec::new());
@@ -2219,19 +2081,6 @@ fn parse_drop_keys_override(raw: Option<&Vec<String>>) -> AppResult<Vec<String>>
         out.push(k.to_string());
     }
     Ok(out)
-}
-
-fn parse_alias_import_pk_json(raw: Option<&str>) -> AppResult<Vec<(String, String)>> {
-    let Some(raw) = raw else {
-        return Ok(Vec::new());
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-    let val = serde_json::from_str::<Value>(trimmed)
-        .map_err(|e| AppError::Internal(format!("invalid alias_import_pk in job: {e}")))?;
-    parse_alias_import_pk_override(Some(&val))
 }
 
 fn parse_drop_keys_json(raw: Option<&str>) -> AppResult<Vec<String>> {
@@ -2385,7 +2234,7 @@ async fn fetch_import_job(conn: &libsql::Connection, job_id: &str) -> AppResult<
                     ignore_input_id, allow_system_timestamps,
                     last_error_code, last_error_message,
                     read_count, inserted_count, updated_count, skipped_count, error_count,
-                    last_line_no, last_byte_offset, worker_id, lease_expires_at, alias_import_pk, drop_keys_json,
+                    last_line_no, last_byte_offset, worker_id, lease_expires_at, drop_keys_json,
                     started_at, finished_at, created_at, updated_at
              FROM __kdb_jobs WHERE job_id = ? AND job_type = 'import_jsonl' LIMIT 1",
             libsql::params![job_id.to_string()],
@@ -2461,25 +2310,21 @@ async fn fetch_import_job(conn: &libsql::Connection, job_id: &str) -> AppResult<
     let lease_expires_at: Option<String> = row
         .get(20)
         .map_err(|e| AppError::Internal(format!("get_import_job decode failed: {e}")))?;
-    let alias_import_pk_json: Option<String> = row
+    let drop_keys_json: Option<String> = row
         .get(21)
         .map_err(|e| AppError::Internal(format!("get_import_job decode failed: {e}")))?;
-    let drop_keys_json: Option<String> = row
+    let started_at: Option<String> = row
         .get(22)
         .map_err(|e| AppError::Internal(format!("get_import_job decode failed: {e}")))?;
-    let started_at: Option<String> = row
+    let finished_at: Option<String> = row
         .get(23)
         .map_err(|e| AppError::Internal(format!("get_import_job decode failed: {e}")))?;
-    let finished_at: Option<String> = row
+    let created_at: String = row
         .get(24)
         .map_err(|e| AppError::Internal(format!("get_import_job decode failed: {e}")))?;
-    let created_at: String = row
+    let updated_at: String = row
         .get(25)
         .map_err(|e| AppError::Internal(format!("get_import_job decode failed: {e}")))?;
-    let updated_at: String = row
-        .get(26)
-        .map_err(|e| AppError::Internal(format!("get_import_job decode failed: {e}")))?;
-    let alias_import_pk = parse_alias_import_pk_json(alias_import_pk_json.as_deref())?;
     let drop_keys = parse_drop_keys_json(drop_keys_json.as_deref())?;
 
     Ok(json!({
@@ -2487,7 +2332,6 @@ async fn fetch_import_job(conn: &libsql::Connection, job_id: &str) -> AppResult<
         "collection": collection,
         "source_path": source_path,
         "source_hash": source_hash,
-        "alias_import_pk": alias_import_pk,
         "drop_keys": drop_keys,
         "on_conflict": on_conflict,
         "ignore_input_id": ignore_input_id == 1,
