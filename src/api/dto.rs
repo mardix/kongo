@@ -108,6 +108,8 @@ pub struct OperationPayload {
     pub bucket_label: Option<String>,
     pub metrics: Option<Value>,
     pub batch: Option<Vec<OperationPayload>>,
+    pub queries: Option<Vec<MultiQueryItem>>,
+    pub on_error: Option<String>,
     pub replace: Option<bool>,
     pub unique_fields: Option<Vec<String>>,
     pub ignore_input_id: Option<bool>,
@@ -162,6 +164,15 @@ pub struct OperationPayload {
     pub explain: Option<bool>,
     pub force_db: Option<bool>,
     pub cache: Option<CacheHint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiQueryItem {
+    pub alias: String,
+    pub namespace: Option<String>,
+    pub namespaces: Option<Vec<String>>,
+    #[serde(default)]
+    pub payload: OperationPayload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

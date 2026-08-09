@@ -94,6 +94,7 @@ async fn main() {
         cfg.response.include_namespace,
         matches!(cfg.json_storage.format, JsonStorageFormat::Jsonb),
         cfg.query.default_limit,
+        cfg.query.multi_max_queries,
         cfg.query_lookup.max_depth,
         cfg.query_lookup.uncapped_override_enabled,
         cfg.query_lookup.max_concurrency,

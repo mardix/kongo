@@ -16,7 +16,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use uuid::Uuid;
 
 use crate::{
-    api::dto::{CacheHint, GatewayRequest, GatewayResponse, OperationPayload},
+    api::dto::{CacheHint, GatewayRequest, GatewayResponse, MultiQueryItem, OperationPayload},
     error::{AppError, AppResult},
     query::jql::build_where,
     state::AppState,
@@ -267,6 +267,7 @@ async fn dispatch_inner(
         "sql_execute" => sql_execute(state, db_path, &conn, req).await,
         "aggregate" => aggregate(state, db_path, &conn, req).await,
         "query" => query(state, db_path, &conn, req).await,
+        "multi_query" => multi_query(state, db_path, &conn, req).await,
         "export_jsonl" => export_jsonl(state, db_path, &conn, req).await,
         "import_jsonl" => import_jsonl(state, db_path, &conn, req).await,
         "metrics_ingest" => metrics_ingest(state, db_path, &conn, req).await,

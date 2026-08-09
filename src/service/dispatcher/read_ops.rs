@@ -206,15 +206,36 @@ async fn aggregate(
     Ok(GatewayResponse::ok(Some(data)))
 }
 
-async fn query(
+// Query futures stay boxed so lookup-heavy execution does not inflate the dispatcher task stack.
+fn query<'a>(
+    state: &'a AppState,
+    db_path: &'a str,
+    conn: &'a libsql::Connection,
+    req: GatewayRequest,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<GatewayResponse>> + Send + 'a>> {
+    Box::pin(async move {
+        let data = execute_query(state, db_path, conn, req.payload).await?;
+        Ok(GatewayResponse::ok(Some(data)))
+    })
+}
+
+fn execute_query<'a>(
+    state: &'a AppState,
+    db_path: &'a str,
+    conn: &'a libsql::Connection,
+    payload: OperationPayload,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<Value>> + Send + 'a>> {
+    Box::pin(execute_query_inner(state, db_path, conn, payload))
+}
+
+async fn execute_query_inner(
     state: &AppState,
     db_path: &str,
     conn: &libsql::Connection,
-    req: GatewayRequest,
-) -> AppResult<GatewayResponse> {
-    let payload = req.payload;
+    payload: OperationPayload,
+) -> AppResult<Value> {
     if payload.search.is_some() {
-        return query_fts(state, db_path, conn, payload).await;
+        return execute_query_fts(state, db_path, conn, payload).await;
     }
     let namespace_scope = resolve_read_namespace_scope(&payload, true)?;
     let include_namespace = payload
@@ -227,9 +248,8 @@ async fn query(
     }
     let source = resolve_source(&payload);
     let explicit_ids = explicit_ids_from_query_filter(payload.filter.as_ref())?;
-    let allow_pending = explicit_ids.is_some()
-        && !payload.force_db.unwrap_or(false)
-        && source == "__kdb_documents";
+    let allow_pending =
+        explicit_ids.is_some() && !payload.force_db.unwrap_or(false) && source == "__kdb_documents";
     let cache_meta = if allow_pending {
         None
     } else {
@@ -237,7 +257,7 @@ async fn query(
     };
     if let Some(meta) = cache_meta.as_ref() {
         if let Some(cached) = get_cached_read(state, meta).await {
-            return Ok(GatewayResponse::ok(Some(cached)));
+            return Ok(cached);
         }
     }
     let (mut where_clause, mut bind_values) = build_where_with_namespace_scope(
@@ -251,11 +271,11 @@ async fn query(
     );
 
     if payload.explain.unwrap_or(false) {
-        return Ok(GatewayResponse::ok(Some(json!({
+        return Ok(json!({
             "where_sql": where_clause,
             "bind_count": bind_values.len(),
             "source": source
-        }))));
+        }));
     }
 
     let mut total_count = execute_count(conn, source, &where_clause, bind_values.clone()).await?;
@@ -326,7 +346,10 @@ async fn query(
 
     if allow_pending {
         let mut pending = HashMap::<String, Value>::new();
-        for id in explicit_ids.as_ref().expect("allow_pending requires explicit ids") {
+        for id in explicit_ids
+            .as_ref()
+            .expect("allow_pending requires explicit ids")
+        {
             if let Some(candidate) = state.get_pending_document(db_path, id) {
                 if pending_matches_read_scope(&candidate.collection, &namespace_scope) {
                     let mut item = candidate.document;
@@ -399,7 +422,216 @@ async fn query(
     if let Some(meta) = cache_meta {
         put_cached_read(state, &meta, data.clone()).await;
     }
-    Ok(GatewayResponse::ok(Some(data)))
+    Ok(data)
+}
+
+fn multi_query<'a>(
+    state: &'a AppState,
+    db_path: &'a str,
+    conn: &'a libsql::Connection,
+    req: GatewayRequest,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<GatewayResponse>> + Send + 'a>> {
+    Box::pin(multi_query_inner(state, db_path, conn, req))
+}
+
+async fn multi_query_inner(
+    state: &AppState,
+    db_path: &str,
+    conn: &libsql::Connection,
+    req: GatewayRequest,
+) -> AppResult<GatewayResponse> {
+    let (on_error, queries) = prepare_multi_queries(req.payload, state.query_multi_max_queries)?;
+    let count = queries.len();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut results = Vec::<Value>::with_capacity(count);
+
+    for query in queries {
+        match execute_query(state, db_path, conn, query.payload).await {
+            Ok(data) => {
+                succeeded += 1;
+                results.push(json!({
+                    "alias": query.alias,
+                    "status": "success",
+                    "data": data
+                }));
+            }
+            Err(error) if on_error == MultiQueryOnError::Fail => return Err(error),
+            Err(error) => {
+                failed += 1;
+                results.push(json!({
+                    "alias": query.alias,
+                    "status": "error",
+                    "error": multi_query_error_value(error)
+                }));
+            }
+        }
+    }
+
+    let mut response = GatewayResponse::ok(Some(json!({
+        "count": count,
+        "succeeded": succeeded,
+        "failed": failed,
+        "results": results
+    })));
+    if failed > 0 {
+        response.status = "partial";
+    }
+    Ok(response)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MultiQueryOnError {
+    Fail,
+    Continue,
+}
+
+#[derive(Debug)]
+struct PreparedMultiQuery {
+    alias: String,
+    payload: OperationPayload,
+}
+
+fn prepare_multi_queries(
+    payload: OperationPayload,
+    max_queries: usize,
+) -> AppResult<(MultiQueryOnError, Vec<PreparedMultiQuery>)> {
+    if payload.collection.is_some() || payload.namespaces.is_some() {
+        return Err(AppError::BadRequest(
+            "multi_query namespace selectors belong on each queries[] item".to_string(),
+        ));
+    }
+    let on_error = match payload
+        .on_error
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("fail")
+    {
+        "fail" => MultiQueryOnError::Fail,
+        "continue" => MultiQueryOnError::Continue,
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "multi_query on_error must be fail|continue, got: {other}"
+            )));
+        }
+    };
+    let queries = payload
+        .queries
+        .ok_or_else(|| AppError::BadRequest("multi_query queries is required".to_string()))?;
+    if queries.is_empty() {
+        return Err(AppError::BadRequest(
+            "multi_query queries must contain at least one item".to_string(),
+        ));
+    }
+    if queries.len() > max_queries {
+        return Err(AppError::BadRequest(format!(
+            "multi_query queries exceeds configured maximum of {max_queries}"
+        )));
+    }
+
+    let mut aliases = HashSet::<String>::with_capacity(queries.len());
+    let mut prepared = Vec::<PreparedMultiQuery>::with_capacity(queries.len());
+    for (index, query) in queries.into_iter().enumerate() {
+        let alias = query.alias.trim().to_string();
+        if alias.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "multi_query queries[{index}].alias must be non-empty"
+            )));
+        }
+        if !aliases.insert(alias.clone()) {
+            return Err(AppError::BadRequest(format!(
+                "multi_query alias must be unique: {alias}"
+            )));
+        }
+        let child_payload = normalize_multi_query_item(query, index)?;
+        prepared.push(PreparedMultiQuery {
+            alias,
+            payload: child_payload,
+        });
+    }
+    Ok((on_error, prepared))
+}
+
+fn normalize_multi_query_item(query: MultiQueryItem, index: usize) -> AppResult<OperationPayload> {
+    let MultiQueryItem {
+        namespace,
+        namespaces,
+        mut payload,
+        ..
+    } = query;
+    if payload.queries.is_some() || payload.on_error.is_some() {
+        return Err(AppError::BadRequest(format!(
+            "multi_query queries[{index}] cannot contain a nested multi_query payload"
+        )));
+    }
+    if payload.collection.is_some() || payload.namespaces.is_some() {
+        return Err(AppError::BadRequest(format!(
+            "multi_query queries[{index}] namespace selector must be on the query item"
+        )));
+    }
+    if namespace.is_some() && namespaces.is_some() {
+        return Err(AppError::BadRequest(format!(
+            "multi_query queries[{index}] cannot provide both namespace and namespaces"
+        )));
+    }
+
+    if let Some(namespace) = namespace {
+        let namespace = namespace.trim().to_string();
+        if namespace.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "multi_query queries[{index}].namespace must be non-empty"
+            )));
+        }
+        if namespace == "*" {
+            payload.namespaces = Some(vec!["*".to_string()]);
+            payload.scope = Some("all".to_string());
+        } else {
+            payload.collection = Some(namespace);
+        }
+        return Ok(payload);
+    }
+
+    if let Some(namespaces) = namespaces {
+        let mut namespaces = namespaces
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        namespaces.sort();
+        namespaces.dedup();
+        if namespaces.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "multi_query queries[{index}].namespaces must be non-empty"
+            )));
+        }
+        if namespaces.iter().any(|value| value == "*") && namespaces.len() > 1 {
+            return Err(AppError::BadRequest(format!(
+                "multi_query queries[{index}].namespaces cannot include '*' with other values"
+            )));
+        }
+        if namespaces.len() == 1 && namespaces[0] == "*" {
+            payload.scope = Some("all".to_string());
+        }
+        payload.namespaces = Some(namespaces);
+        return Ok(payload);
+    }
+
+    Err(AppError::BadRequest(format!(
+        "multi_query queries[{index}] requires namespace or namespaces"
+    )))
+}
+
+fn multi_query_error_value(error: AppError) -> Value {
+    let (code, message) = match error {
+        AppError::BadRequest(message) => ("bad_request", message),
+        AppError::Unauthorized(message) => ("unauthorized", message),
+        AppError::Conflict(message) => ("conflict", message),
+        AppError::NotFound(message) => ("not_found", message),
+        AppError::Timeout(message) => ("timeout", message),
+        AppError::Internal(message) => ("internal", message),
+    };
+    json!({ "code": code, "message": message })
 }
 
 fn explicit_ids_from_query_filter(filter: Option<&Value>) -> AppResult<Option<Vec<String>>> {
@@ -449,12 +681,12 @@ fn explicit_ids_from_query_filter(filter: Option<&Value>) -> AppResult<Option<Ve
     Ok(Some(ids))
 }
 
-async fn query_fts(
+async fn execute_query_fts(
     state: &AppState,
     db_path: &str,
     conn: &libsql::Connection,
     payload: OperationPayload,
-) -> AppResult<GatewayResponse> {
+) -> AppResult<Value> {
     if !get_bool_config(conn, "fts_enabled").await?.unwrap_or(true) {
         return Err(AppError::BadRequest(
             "search is disable: db_config.fts_enabled=false".to_string(),
@@ -485,7 +717,7 @@ async fn query_fts(
     let cache_meta = cache_key_for_read(state, db_path, "query", &payload)?;
     if let Some(meta) = cache_meta.as_ref() {
         if let Some(cached) = get_cached_read(state, meta).await {
-            return Ok(GatewayResponse::ok(Some(cached)));
+            return Ok(cached);
         }
     }
 
@@ -700,5 +932,71 @@ async fn query_fts(
     if let Some(meta) = cache_meta {
         put_cached_read(state, &meta, data.clone()).await;
     }
-    Ok(GatewayResponse::ok(Some(data)))
+    Ok(data)
+}
+
+#[cfg(test)]
+mod multi_query_tests {
+    use super::*;
+
+    fn payload(value: Value) -> OperationPayload {
+        serde_json::from_value(value).expect("valid operation payload")
+    }
+
+    #[test]
+    fn multi_query_validation_normalizes_children_before_execution() {
+        let request = payload(json!({
+            "queries": [
+                {"alias": "users", "namespace": "users", "payload": {"limit": 10}},
+                {"alias": "all", "namespaces": ["orders", "admins"], "payload": {"fields": ["name"]}}
+            ]
+        }));
+
+        let (on_error, queries) = prepare_multi_queries(request, 20).expect("valid batch");
+        assert_eq!(on_error, MultiQueryOnError::Fail);
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0].payload.collection.as_deref(), Some("users"));
+        assert_eq!(
+            queries[1].payload.namespaces.as_deref(),
+            Some(["admins".to_string(), "orders".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn multi_query_validation_rejects_alias_scope_and_size_errors() {
+        let duplicate = payload(json!({
+            "queries": [
+                {"alias": "same", "namespace": "users", "payload": {}},
+                {"alias": "same", "namespace": "orders", "payload": {}}
+            ]
+        }));
+        assert!(prepare_multi_queries(duplicate, 20).is_err());
+
+        let missing_namespace = payload(json!({
+            "queries": [{"alias": "users", "payload": {}}]
+        }));
+        assert!(prepare_multi_queries(missing_namespace, 20).is_err());
+
+        let oversized = payload(json!({
+            "queries": [
+                {"alias": "one", "namespace": "users", "payload": {}},
+                {"alias": "two", "namespace": "orders", "payload": {}}
+            ]
+        }));
+        assert!(prepare_multi_queries(oversized, 1).is_err());
+    }
+
+    #[test]
+    fn multi_query_is_classified_as_read_only() {
+        let request: GatewayRequest = serde_json::from_value(json!({
+            "db": "app/main",
+            "operation": "multi_query",
+            "payload": {
+                "queries": [{"alias": "users", "namespace": "users", "payload": {}}]
+            }
+        }))
+        .expect("valid gateway request");
+
+        assert!(!request_is_write(&request));
+    }
 }

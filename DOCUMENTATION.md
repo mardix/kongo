@@ -206,7 +206,7 @@ Use this table as the quick reference for common payload keys and their meanings
 | `on_conflict` | string | Conflict policy (op-specific) |
 | `commit` | bool | Per-request write ack override: `true` committed, `false` accepted |
 | `force_db` | bool | For `query` with an explicit `_id`/`_id.$in` filter, bypass pending accepted-write overlay and read only durable DB state |
-| `alias` | string | Metric Events result alias; defaults to `default` for single metrics query |
+| `alias` | string | Metric Events result alias, or required unique child result name inside `multi_query.queries[]` |
 | `label` | string | Metric Events result label; supports templates like `{{start YYYY-MM-DD}}` |
 | `event` | string | Metric Events event selector or tracked event name |
 | `events` | array | Metric Events track events array, or metrics query event-name array |
@@ -263,6 +263,8 @@ Use this table as the quick reference for common payload keys and their meanings
 | `bucket_label` | string | Metric Events item bucket label template, e.g. `{{bucket HH:mm}}` |
 | `metrics` | array | Metric Events metric definitions |
 | `batch` | array | Multiple metric events queries in one `metrics_query` request |
+| `queries` | array | Read-only `multi_query` child queries; each item has `alias`, `namespace|namespaces`, and a normal query `payload` |
+| `on_error` | string | `multi_query` runtime error policy: `fail` (default) or `continue` |
 | `unique_fields` | string[] | Insert-family soft uniqueness paths (dot notation) |
 | `ignore_input_id` | bool | Import: ignore `_id` and `id` from input; `_key` remains ordinary document data |
 | `resumable` | bool | Import job resumable flag |
@@ -440,6 +442,7 @@ Use this catalog to find an operation by task. The detailed reference follows in
 | `upsert` | `namespace`, `filter`, `insert_data` | Update filter matches or insert one document when none exist. |
 | `count` | `namespace` or `scope:"all"` | Return only the number of matching live/archive documents. |
 | `query` | `namespace`, `namespaces`, or `namespace:"*"` | Return documents with Filter Operators, pagination, sorting, projection, FTS, lookups, compute, and attachments. |
+| `multi_query` | `payload.queries[]` with unique `alias` and namespace selector | Execute several independent read-only document queries against one database in one HTTP request. |
 | `aggregate` | `compute`, namespace or all scope | Compute set-level counts, sums, averages, extrema, and distinct values. |
 | `delete` | Exactly one of `id`, `ids`, `filter` | Soft-delete into archive by default or hard-delete with `purge:true`. |
 | `set_ttl` | `ids` or `filter`, plus `ttl_seconds` | Schedule document expiration or clear an existing TTL. |
@@ -631,13 +634,14 @@ Use the operations in this order when learning the API:
 3. `upsert` chooses between update and insert using a filter.
 4. `count` returns only the number of matching documents.
 5. `query` returns documents and supports FTS, pagination, projection, lookups, and per-row computation.
-6. `aggregate` computes set-level values without returning the matching documents.
-7. `delete` soft-deletes or permanently purges selected documents.
-8. `set_ttl` schedules or clears future document expiration.
-9. Document lifecycle operations schedule, inspect, cancel, and explicitly retry conditional future mutations.
-10. `import_jsonl` asynchronously ingests large JSONL files.
-11. `export_jsonl` asynchronously writes selected documents to JSONL.
-12. `transaction` atomically applies multiple supported document mutations to one database.
+6. `multi_query` executes several independent queries through one HTTP request.
+7. `aggregate` computes set-level values without returning the matching documents.
+8. `delete` soft-deletes or permanently purges selected documents.
+9. `set_ttl` schedules or clears future document expiration.
+10. Document lifecycle operations schedule, inspect, cancel, and explicitly retry conditional future mutations.
+11. `import_jsonl` asynchronously ingests large JSONL files.
+12. `export_jsonl` asynchronously writes selected documents to JSONL.
+13. `transaction` atomically applies multiple supported document mutations to one database.
 
 #### Shared Write Behavior
 
@@ -1209,6 +1213,189 @@ The response de-duplicates users into an attachment map:
   }
 }
 ```
+
+#### `multi_query`
+
+Executes multiple independent document queries against one database through one HTTP request. It is a read-only batch wrapper around the same engine used by `query`; child queries retain normal filtering, FTS, cache, pagination, projection, lookups, compute, pending-document reads, and user attachments.
+
+Use `multi_query` when one application screen needs several datasets from the same database. It removes repeated HTTP round trips without combining the datasets or changing query semantics. It is not a transaction and does not provide a shared read snapshot across children.
+
+Children execute sequentially on the same open database connection in request order. One `KONGODB_OPERATION_TIMEOUT_MS` deadline covers the complete request. Cache keys and auto-index heatmap observations remain independent per child.
+
+##### Request Shape
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "multi_query",
+  "payload": {
+    "on_error": "fail",
+    "queries": [
+      {
+        "alias": "users",
+        "namespace": "users",
+        "payload": {
+          "filter": {"status": "active"},
+          "sort": "name asc",
+          "page": 1,
+          "per_page": 10
+        }
+      },
+      {
+        "alias": "open_orders",
+        "namespace": "orders",
+        "payload": {
+          "filter": {"status": "open"},
+          "fields": ["_id", "user_id", "total"],
+          "limit": 25
+        }
+      }
+    ]
+  }
+}
+```
+
+`db` and `operation` belong only to the outer request. Every child is always a document `query`; child items cannot choose another operation.
+
+##### Batch Options
+
+| Property | Type | Default | Description |
+|---|---:|---:|---|
+| `queries` | object[] | Required | Between 1 and `KONGODB_QUERY_MULTI_MAX_QUERIES` independent child queries. |
+| `on_error` | string | `fail` | `fail` returns the first runtime error as a request error. `continue` returns successful and failed child results together. |
+
+##### Child Query Shape
+
+| Property | Type | Required | Description |
+|---|---:|---:|---|
+| `alias` | string | Yes | Non-empty unique result identifier. Results preserve request order and repeat this alias. |
+| `namespace` | string | One selector | One namespace or `"*"`. |
+| `namespaces` | string[] | One selector | One or more namespaces. Cannot be combined with `namespace`; `"*"` cannot be combined with other values. |
+| `payload` | object | No | Any normal `query` payload, including `filter`, `search`, pagination, projection, lookup, compute, attachments, archive controls, `force_db`, and `cache`. |
+
+Namespace selectors must be properties of the child query item, not inside its `payload`. Empty batches, missing or duplicate aliases, missing selectors, conflicting selectors, nested `queries`, invalid `on_error`, and oversized batches are rejected before any child executes.
+
+##### Structured and Full-Text Queries Together
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "multi_query",
+  "payload": {
+    "queries": [
+      {
+        "alias": "recent_users",
+        "namespace": "users",
+        "payload": {
+          "filter": {"status": "active"},
+          "sort": "_created_at desc",
+          "limit": 10
+        }
+      },
+      {
+        "alias": "matching_articles",
+        "namespace": "articles",
+        "payload": {
+          "search": "sqlite AND json",
+          "fields": ["_id", "title", "_search_score"],
+          "limit": 10
+        }
+      }
+    ]
+  }
+}
+```
+
+The FTS child has the same requirements as ordinary FTS query mode: database-level FTS access must be enabled and the index must exist and be populated.
+
+##### Successful Response
+
+```json
+{
+  "status": "success",
+  "data": {
+    "count": 2,
+    "succeeded": 2,
+    "failed": 0,
+    "results": [
+      {
+        "alias": "users",
+        "status": "success",
+        "data": {
+          "count": 1,
+          "total_items": 12,
+          "items": [],
+          "limit": 10,
+          "offset": 0,
+          "next_offset": 10,
+          "prev_offset": null,
+          "pagination": {}
+        }
+      },
+      {
+        "alias": "open_orders",
+        "status": "success",
+        "data": {
+          "count": 4,
+          "total_items": 4,
+          "items": [],
+          "limit": 25,
+          "offset": 0,
+          "next_offset": null,
+          "prev_offset": null,
+          "pagination": {}
+        }
+      }
+    ]
+  }
+}
+```
+
+Each successful child `data` object is exactly the value that the same standalone `query` would return.
+
+##### Continue on Runtime Errors
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "multi_query",
+  "payload": {
+    "on_error": "continue",
+    "queries": [
+      {"alias": "users", "namespace": "users", "payload": {"limit": 10}},
+      {"alias": "orders", "namespace": "orders", "payload": {"sort": "name sideways"}}
+    ]
+  }
+}
+```
+
+```json
+{
+  "status": "partial",
+  "data": {
+    "count": 2,
+    "succeeded": 1,
+    "failed": 1,
+    "results": [
+      {
+        "alias": "users",
+        "status": "success",
+        "data": {}
+      },
+      {
+        "alias": "orders",
+        "status": "error",
+        "error": {
+          "code": "bad_request",
+          "message": "sort direction must be ASC or DESC in string mode"
+        }
+      }
+    ]
+  }
+}
+```
+
+`partial` is returned only when `on_error:"continue"` captures at least one runtime failure. With the default `on_error:"fail"`, the first runtime error ends execution and uses the normal gateway error response. Structural validation always fails the whole request before execution, regardless of `on_error`.
 
 #### `aggregate`
 
@@ -4655,6 +4842,7 @@ The TTL reaper checks active databases on its fixed interval but only publishes 
 | `KONGODB_CACHE_TTL_SECS` | `15` | Default read-cache TTL; `0` disables the read cache. |
 | `KONGODB_WRITE_MODE` | `committed` | `direct`, `committed`, or `accepted`. `direct` bypasses the coordinator; `committed` waits; `accepted` queues and acknowledges. Request `payload.commit` overrides committed vs accepted. |
 | `KONGODB_QUERY_DEFAULT_LIMIT` | `50` | Default query and per-lookup limit. |
+| `KONGODB_QUERY_MULTI_MAX_QUERIES` | `20` | Maximum child queries accepted by one read-only `multi_query` request. |
 | `KONGODB_QUERY_LOOKUP_MAX_DEPTH` | `3` | Maximum nested lookup depth. |
 | `KONGODB_QUERY_LOOKUP_UNCAPPED_OVERRIDE_ENABLED` | `false` | Allows explicit request-level lookup depth override beyond the configured cap. |
 | `KONGODB_RESPONSE_INCLUDE_SYSTEM_TIMESTAMPS` | `true` | Include `_created_at` and `_modified_at`. |

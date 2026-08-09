@@ -208,10 +208,7 @@ fn validate_drop_ddl(tokens: &[&str], lowered: &[String]) -> AppResult<()> {
             "sql_execute only allows DROP INDEX".to_string(),
         ));
     }
-    let index_name_idx = if lowered.len() >= 5
-        && lowered[2] == "if"
-        && lowered[3] == "exists"
-    {
+    let index_name_idx = if lowered.len() >= 5 && lowered[2] == "if" && lowered[3] == "exists" {
         4
     } else {
         2
@@ -247,9 +244,7 @@ fn validate_alter_ddl(tokens: &[&str], lowered: &[String]) -> AppResult<()> {
 fn reject_reserved_sql_identifier(raw: &str, kind: &str) -> AppResult<()> {
     let ident = normalize_sql_identifier(raw);
     if ident.is_empty() {
-        return Err(AppError::BadRequest(format!(
-            "{kind} name is required"
-        )));
+        return Err(AppError::BadRequest(format!("{kind} name is required")));
     }
     let lower = ident.to_ascii_lowercase();
     if lower.starts_with("__kdb_") || lower.starts_with("sqlite_") {
@@ -562,6 +557,7 @@ fn is_write_operation(operation: &str) -> bool {
             | "file_get"
             | "file_query"
             | "query"
+            | "multi_query"
             | "list_indexes"
             | "list_backups"
             | "export_jsonl"
@@ -670,7 +666,9 @@ fn parse_namespaces(raw: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> 
         .filter(|v| !v.is_empty())
         .collect::<Vec<_>>();
     if out.is_empty() {
-        return Err(AppError::BadRequest("namespaces cannot be empty".to_string()));
+        return Err(AppError::BadRequest(
+            "namespaces cannot be empty".to_string(),
+        ));
     }
     out.sort();
     out.dedup();
@@ -770,9 +768,7 @@ fn resolve_pagination_args(
     let limit = payload.per_page.unwrap_or(default_limit).max(1);
     let page = payload.page.unwrap_or(1);
     if page <= 0 {
-        return Err(AppError::BadRequest(
-            "page must be >= 1".to_string(),
-        ));
+        return Err(AppError::BadRequest("page must be >= 1".to_string()));
     }
     let offset = (page - 1).saturating_mul(limit);
     Ok((limit, offset, page))
@@ -959,7 +955,7 @@ fn prepare_accepted_ack_preview(req: &mut GatewayRequest) -> AppResult<Value> {
                     Some(_) => {
                         return Err(AppError::BadRequest(
                             "_id must be a non-empty string".to_string(),
-                        ))
+                        ));
                     }
                     None => {
                         let generated_id = Uuid::new_v4().simple().to_string();
@@ -978,7 +974,7 @@ fn prepare_accepted_ack_preview(req: &mut GatewayRequest) -> AppResult<Value> {
                         Some(_) => {
                             return Err(AppError::BadRequest(
                                 "_id must be a non-empty string".to_string(),
-                            ))
+                            ));
                         }
                         None => {
                             let generated_id = Uuid::new_v4().simple().to_string();
@@ -1024,15 +1020,15 @@ fn prepare_accepted_ack_preview(req: &mut GatewayRequest) -> AppResult<Value> {
                 .ok_or_else(|| AppError::BadRequest("events is required".to_string()))?;
             let count = events.len();
             for event in events.iter_mut() {
-                let obj = event
-                    .as_object_mut()
-                    .ok_or_else(|| AppError::BadRequest("events items must be objects".to_string()))?;
+                let obj = event.as_object_mut().ok_or_else(|| {
+                    AppError::BadRequest("events items must be objects".to_string())
+                })?;
                 let id = match obj.get("_id") {
                     Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
                     Some(_) => {
                         return Err(AppError::BadRequest(
                             "event _id must be a non-empty string".to_string(),
-                        ))
+                        ));
                     }
                     None => {
                         let generated_id = format!("evt_{}", Uuid::new_v4().simple());
@@ -1058,15 +1054,15 @@ fn prepare_accepted_ack_preview(req: &mut GatewayRequest) -> AppResult<Value> {
                 .ok_or_else(|| AppError::BadRequest("events is required".to_string()))?;
             let count = events.len();
             for event in events.iter_mut() {
-                let obj = event
-                    .as_object_mut()
-                    .ok_or_else(|| AppError::BadRequest("events items must be objects".to_string()))?;
+                let obj = event.as_object_mut().ok_or_else(|| {
+                    AppError::BadRequest("events items must be objects".to_string())
+                })?;
                 let id = match obj.get("_id") {
                     Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
                     Some(_) => {
                         return Err(AppError::BadRequest(
                             "audit event _id must be a non-empty string".to_string(),
-                        ))
+                        ));
                     }
                     None => {
                         let generated_id = format!("aud_{}", Uuid::new_v4().simple());
@@ -1095,12 +1091,7 @@ fn prepare_accepted_ack_preview(req: &mut GatewayRequest) -> AppResult<Value> {
                 ids.push(id);
             }
             if let Some(payload_ids) = req.payload.ids.as_ref() {
-                ids.extend(
-                    payload_ids
-                        .iter()
-                        .filter(|s| !s.trim().is_empty())
-                        .cloned(),
-                );
+                ids.extend(payload_ids.iter().filter(|s| !s.trim().is_empty()).cloned());
             }
             if ids.is_empty() {
                 if let Some(id) = req
@@ -1192,11 +1183,7 @@ fn invalidate_read_cache_after_write(
 
     let is_multi_scope = matches!(
         operation,
-        "transaction"
-            | "restore_archive"
-            | "purge_archive"
-            | "recompute_stats"
-            | "offload_db"
+        "transaction" | "restore_archive" | "purge_archive" | "recompute_stats" | "offload_db"
     ) || collection.is_none();
 
     if is_multi_scope {
@@ -1333,14 +1320,17 @@ async fn prepare_pending_update_preview(
 ) -> AppResult<crate::state::PendingWritePreview> {
     let payload = req.payload.clone();
     let collection = resolve_collection_scope_optional_collection(&payload)?;
-    let conn = state.db_manager.get_conn_with_create(db_path, false).await?;
+    let conn = state
+        .db_manager
+        .get_conn_with_create(db_path, false)
+        .await?;
     let docs = match payload.data.clone() {
         Some(Value::Object(obj)) => vec![Value::Object(obj)],
         Some(Value::Array(items)) => items,
         _ => {
             return Err(AppError::BadRequest(
                 "update data must be an object or array<object>".to_string(),
-            ))
+            ));
         }
     };
     let mut items = Vec::with_capacity(docs.len());
@@ -1389,7 +1379,11 @@ async fn prepare_pending_update_preview(
             let mut replacement = Value::Object(patch_obj);
             base = replacement_doc_from_payload(&mut replacement, &id)?;
         } else if update_requires_mutation_engine(&patch_obj) {
-            apply_mutation_patch_to_doc(&mut base, &mut patch_obj, state.strict_mutation_operators)?;
+            apply_mutation_patch_to_doc(
+                &mut base,
+                &mut patch_obj,
+                state.strict_mutation_operators,
+            )?;
         } else {
             apply_merge_patch_object(&mut base, &patch_obj)?;
         }
@@ -1429,7 +1423,10 @@ fn pending_matches_scope(pending_collection: &Option<String>, requested: Option<
     }
 }
 
-fn apply_merge_patch_object(doc: &mut Value, patch: &serde_json::Map<String, Value>) -> AppResult<()> {
+fn apply_merge_patch_object(
+    doc: &mut Value,
+    patch: &serde_json::Map<String, Value>,
+) -> AppResult<()> {
     for (path, value) in patch {
         validate_projection_path(path, "data")?;
         let mut value = value.clone();

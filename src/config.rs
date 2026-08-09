@@ -166,6 +166,7 @@ pub enum JsonStorageFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {
     pub default_limit: usize,
+    pub multi_max_queries: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +399,9 @@ impl KongodbConfig {
             },
             query: QueryConfig {
                 default_limit: env_usize("KONGODB_QUERY_DEFAULT_LIMIT").unwrap_or(50),
+                multi_max_queries: env_usize("KONGODB_QUERY_MULTI_MAX_QUERIES")
+                    .unwrap_or(20)
+                    .max(1),
             },
             query_lookup: QueryLookupConfig {
                 max_depth: env_usize("KONGODB_QUERY_LOOKUP_MAX_DEPTH").unwrap_or(3),

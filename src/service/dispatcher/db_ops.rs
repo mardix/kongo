@@ -66,6 +66,7 @@ async fn list_commands() -> AppResult<GatewayResponse> {
         "upsert",
         "count",
         "query",
+        "multi_query",
         "aggregate",
         "metrics_ingest",
         "metrics_query",
@@ -182,10 +183,7 @@ async fn list_all_dbs(state: &AppState) -> AppResult<GatewayResponse> {
     }))))
 }
 
-async fn system_get_inventory(
-    state: &AppState,
-    req: GatewayRequest,
-) -> AppResult<GatewayResponse> {
+async fn system_get_inventory(state: &AppState, req: GatewayRequest) -> AppResult<GatewayResponse> {
     let limit = req.payload.limit.unwrap_or(500).clamp(1, 5000);
     let offset = req.payload.offset.unwrap_or(0).max(0);
     if let Some(catalog) = state.system_catalog.as_ref() {
@@ -604,7 +602,9 @@ async fn sql_get_table_schema(
     if exists_rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("sql_get_table_schema lookup row read failed: {e}")))?
+        .map_err(|e| {
+            AppError::Internal(format!("sql_get_table_schema lookup row read failed: {e}"))
+        })?
         .is_none()
     {
         return Err(AppError::BadRequest(format!("table not found: {table}")));
@@ -621,25 +621,24 @@ async fn sql_get_table_schema(
         .await
         .map_err(|e| AppError::Internal(format!("sql_get_table_schema row read failed: {e}")))?
     {
-        let cid: i64 = row
-            .get(0)
-            .map_err(|e| AppError::Internal(format!("sql_get_table_schema cid decode failed: {e}")))?;
-        let name: String = row
-            .get(1)
-            .map_err(|e| AppError::Internal(format!("sql_get_table_schema name decode failed: {e}")))?;
-        let data_type: String = row
-            .get(2)
-            .map_err(|e| AppError::Internal(format!("sql_get_table_schema type decode failed: {e}")))?;
-        let notnull: i64 = row
-            .get(3)
-            .map_err(|e| AppError::Internal(format!("sql_get_table_schema notnull decode failed: {e}")))?;
-        let default_value = row
-            .get_value(4)
-            .map(libsql_value_to_json)
-            .map_err(|e| AppError::Internal(format!("sql_get_table_schema default decode failed: {e}")))?;
-        let pk: i64 = row
-            .get(5)
-            .map_err(|e| AppError::Internal(format!("sql_get_table_schema pk decode failed: {e}")))?;
+        let cid: i64 = row.get(0).map_err(|e| {
+            AppError::Internal(format!("sql_get_table_schema cid decode failed: {e}"))
+        })?;
+        let name: String = row.get(1).map_err(|e| {
+            AppError::Internal(format!("sql_get_table_schema name decode failed: {e}"))
+        })?;
+        let data_type: String = row.get(2).map_err(|e| {
+            AppError::Internal(format!("sql_get_table_schema type decode failed: {e}"))
+        })?;
+        let notnull: i64 = row.get(3).map_err(|e| {
+            AppError::Internal(format!("sql_get_table_schema notnull decode failed: {e}"))
+        })?;
+        let default_value = row.get_value(4).map(libsql_value_to_json).map_err(|e| {
+            AppError::Internal(format!("sql_get_table_schema default decode failed: {e}"))
+        })?;
+        let pk: i64 = row.get(5).map_err(|e| {
+            AppError::Internal(format!("sql_get_table_schema pk decode failed: {e}"))
+        })?;
         columns.push(json!({
             "cid": cid,
             "name": name,
@@ -662,7 +661,10 @@ fn quote_sql_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-async fn reindex_fts_op(_state: &AppState, conn: &libsql::Connection) -> AppResult<GatewayResponse> {
+async fn reindex_fts_op(
+    _state: &AppState,
+    conn: &libsql::Connection,
+) -> AppResult<GatewayResponse> {
     let job_id = Uuid::new_v4().simple().to_string();
     conn.execute(
         "INSERT INTO __kdb_jobs (
@@ -709,7 +711,6 @@ async fn enable_fts_index_op(
     }))))
 }
 
-
 // Additional DB/admin handlers extracted from dispatcher.rs.
 
 async fn get_stats(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<GatewayResponse> {
@@ -728,7 +729,9 @@ async fn get_stats(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<
 }
 
 async fn get_db_stats(state: &AppState, db_path: &str) -> AppResult<GatewayResponse> {
-    Ok(GatewayResponse::ok(Some(state.db_stats_snapshot_json(db_path))))
+    Ok(GatewayResponse::ok(Some(
+        state.db_stats_snapshot_json(db_path),
+    )))
 }
 
 async fn snapshot_db_stats(
@@ -819,7 +822,9 @@ async fn query_db_stats(
             AppError::Internal(format!("query_db_stats in_flight decode failed: {e}"))
         })?;
         let last_accessed_at: Option<String> = row.get(6).map_err(|e| {
-            AppError::Internal(format!("query_db_stats last_accessed_at decode failed: {e}"))
+            AppError::Internal(format!(
+                "query_db_stats last_accessed_at decode failed: {e}"
+            ))
         })?;
         items.push(json!({
             "ts": ts,
@@ -839,14 +844,16 @@ async fn query_db_stats(
 }
 
 fn u64_to_i64(value: u64, field: &str) -> AppResult<i64> {
-    i64::try_from(value)
-        .map_err(|_| AppError::Internal(format!("{field} is too large to persist")))
+    i64::try_from(value).map_err(|_| AppError::Internal(format!("{field} is too large to persist")))
 }
 
-fn require_system_catalog(state: &AppState) -> AppResult<&crate::storage::system_catalog::SystemCatalog> {
-    state.system_catalog.as_ref().ok_or_else(|| {
-        AppError::Internal("system catalog is unavailable".to_string())
-    })
+fn require_system_catalog(
+    state: &AppState,
+) -> AppResult<&crate::storage::system_catalog::SystemCatalog> {
+    state
+        .system_catalog
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("system catalog is unavailable".to_string()))
 }
 
 async fn collect_live_inventory(state: &AppState) -> AppResult<Vec<Value>> {
@@ -904,8 +911,18 @@ async fn collect_system_db_record(state: &AppState, db: &str) -> AppResult<Syste
 
     Ok(SystemDbRecord {
         db: db.to_string(),
-        status: if last_error.is_some() { "error" } else { "known" }.to_string(),
-        storage_mode: if state.storage_mode_is_s3 { "s3" } else { "local" }.to_string(),
+        status: if last_error.is_some() {
+            "error"
+        } else {
+            "known"
+        }
+        .to_string(),
+        storage_mode: if state.storage_mode_is_s3 {
+            "s3"
+        } else {
+            "local"
+        }
+        .to_string(),
         on_local,
         on_s3,
         loaded,
@@ -917,7 +934,11 @@ async fn collect_system_db_record(state: &AppState, db: &str) -> AppResult<Syste
         archive_count,
         pending_write_count,
         write_queue_depth: queue_depth,
-        last_opened_at: if loaded { runtime.last_accessed_at.clone() } else { None },
+        last_opened_at: if loaded {
+            runtime.last_accessed_at.clone()
+        } else {
+            None
+        },
         last_closed_at: None,
         last_read_at: runtime.last_accessed_at.clone(),
         last_write_at: if runtime.writes_total > 0 {
@@ -948,12 +969,12 @@ async fn collect_loaded_db_counts(conn: &libsql::Connection) -> AppResult<(i64, 
             .await
             .map_err(|e| AppError::Internal(format!("system db counts row failed: {e}")))?
         {
-            let ns: i64 = row
-                .get(0)
-                .map_err(|e| AppError::Internal(format!("system namespace count decode failed: {e}")))?;
-            let docs: i64 = row
-                .get(1)
-                .map_err(|e| AppError::Internal(format!("system document count decode failed: {e}")))?;
+            let ns: i64 = row.get(0).map_err(|e| {
+                AppError::Internal(format!("system namespace count decode failed: {e}"))
+            })?;
+            let docs: i64 = row.get(1).map_err(|e| {
+                AppError::Internal(format!("system document count decode failed: {e}"))
+            })?;
             (ns, docs)
         } else {
             (0, 0)
@@ -969,8 +990,9 @@ async fn collect_loaded_db_counts(conn: &libsql::Connection) -> AppResult<(i64, 
             .await
             .map_err(|e| AppError::Internal(format!("system archive count row failed: {e}")))?
         {
-            row.get(0)
-                .map_err(|e| AppError::Internal(format!("system archive count decode failed: {e}")))?
+            row.get(0).map_err(|e| {
+                AppError::Internal(format!("system archive count decode failed: {e}"))
+            })?
         } else {
             0
         }
@@ -1353,7 +1375,9 @@ async fn rename_namespace(
             libsql::params![to_namespace.clone(), from_namespace.clone()],
         )
         .await
-        .map_err(|e| AppError::Internal(format!("rename_namespace __kdb_archive update failed: {e}")))?;
+        .map_err(|e| {
+            AppError::Internal(format!("rename_namespace __kdb_archive update failed: {e}"))
+        })?;
     tx.execute(
         "UPDATE __kdb_document_transitions SET collection = ?,
          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE collection = ?",
@@ -1625,8 +1649,8 @@ async fn process_next_backup_job_for_db(
             }
         }
 
-            conn.execute(
-                "UPDATE __kdb_jobs
+        conn.execute(
+            "UPDATE __kdb_jobs
                  SET status='completed',
                      backup_db_path=?, size_bytes=?, sha256=?,
                      last_error_code=?, last_error_message=?,
@@ -1634,9 +1658,9 @@ async fn process_next_backup_job_for_db(
                      finished_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                      updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                  WHERE job_id=? AND job_type = 'backup_db'",
-                libsql::params![
-                    written,
-                    size_bytes,
+            libsql::params![
+                written,
+                size_bytes,
                 sha256,
                 warning
                     .as_ref()
@@ -1766,7 +1790,6 @@ async fn list_backups(
         "items": items
     }))))
 }
-
 
 async fn tag_backup(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<GatewayResponse> {
     let payload = req.payload;

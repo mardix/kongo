@@ -259,6 +259,7 @@ The bread and butter — documents in, documents out.
 | `upsert` | `namespace`, `filter`, `insert_data` | Update on match, insert on miss; exact `_id` filters preserve that id. |
 | `count` | — | Count matches, filter optional. |
 | `query` | `namespace`/`namespaces`/`*` | Filter, sort, paginate, project, lookup, per-row compute, or FTS with `payload.search`. |
+| `multi_query` | `payload.queries[]` | Run several aliased, independent document queries against one database in one read-only request. |
 | `aggregate` | `compute` | Set-level metrics: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$distinct`. |
 | `delete` | one of `id` / `ids` / `filter` | Soft-delete to archive by default; `purge=true` hard-deletes. |
 | `set_ttl` | `ids`/`filter` + `ttl_seconds` | Set or reset a document's TTL. |
@@ -1336,6 +1337,7 @@ Idle TTL reaper checks do not publish snapshots. A reaper checkpoint is created 
 | `KONGODB_CACHE_TTL_SECS` | `15` | Read cache TTL; `0` disables the read cache entirely |
 | `KONGODB_WRITE_MODE` | `committed` | `direct` bypasses the write coordinator · `committed` waits for the durable result · `accepted` queues and acknowledges immediately |
 | `KONGODB_QUERY_DEFAULT_LIMIT` | `50` | Default page size when `limit`/`offset` are omitted |
+| `KONGODB_QUERY_MULTI_MAX_QUERIES` | `20` | Maximum child queries in one `multi_query` request |
 | `KONGODB_QUERY_LOOKUP_MAX_DEPTH` | `3` | Default max nested lookup depth |
 | `KONGODB_QUERY_LOOKUP_UNCAPPED_OVERRIDE_ENABLED` | `false` | Allow a request to override the lookup depth cap |
 | `KONGODB_RESPONSE_INCLUDE_SYSTEM_TIMESTAMPS` | `true` | Include `_created_at`/`_modified_at` in responses by default |
