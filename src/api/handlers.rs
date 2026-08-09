@@ -12,7 +12,7 @@ use serde_json::json;
 use std::{collections::HashMap, fs, time::Duration};
 
 use crate::{
-    api::dto::{GatewayRequest, GatewayResponse},
+    api::dto::{GatewayRequest, GatewayResponse, NamespaceSelector},
     error::{AppError, AppResult},
     service::dispatcher,
     state::{AppState, SystemRequestKind},
@@ -93,27 +93,15 @@ fn normalize_request_operation_alias(req: &mut GatewayRequest) -> AppResult<()> 
                 "operation shorthand must include a namespace selector after '::'".to_string(),
             ));
         }
-        if req
-            .namespace
-            .as_ref()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-            || req
-                .namespaces
-                .as_ref()
-                .map(|v| v.iter().any(|item| !item.trim().is_empty()))
-                .unwrap_or(false)
-        {
+        if req.namespace.is_some() {
             return Err(AppError::BadRequest(
-                "operation shorthand cannot be combined with top-level namespace/namespaces"
-                    .to_string(),
+                "operation shorthand cannot be combined with top-level namespace".to_string(),
             ));
         }
 
         req.operation = op.to_string();
         if scope == "*" {
-            req.namespace = Some("*".to_string());
-            req.namespaces = None;
+            req.namespace = Some(NamespaceSelector::One("*".to_string()));
         } else if scope.contains(',') {
             let namespaces = scope
                 .split(',')
@@ -122,136 +110,124 @@ fn normalize_request_operation_alias(req: &mut GatewayRequest) -> AppResult<()> 
                 .collect::<Vec<_>>();
             if namespaces.is_empty() {
                 return Err(AppError::BadRequest(
-                    "operation shorthand namespaces cannot be empty".to_string(),
+                    "operation shorthand namespace list cannot be empty".to_string(),
                 ));
             }
-            req.namespace = None;
-            req.namespaces = Some(namespaces);
+            req.namespace = Some(NamespaceSelector::Many(namespaces));
         } else {
-            req.namespace = Some(scope.to_string());
-            req.namespaces = None;
+            req.namespace = Some(NamespaceSelector::One(scope.to_string()));
         }
     }
 
-    if let Some(children) = req.data.as_mut() {
-        for child in children {
-            normalize_request_operation_alias(child)?;
-        }
-    }
     Ok(())
 }
 
 fn normalize_request_namespace(req: &mut GatewayRequest) -> AppResult<()> {
-    if let Some(raw_list) = req.namespaces.clone() {
-        let namespaces = raw_list
-            .into_iter()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .collect::<Vec<_>>();
-        if namespaces.is_empty() {
-            return Err(AppError::BadRequest(
-                "namespaces cannot be empty".to_string(),
-            ));
-        }
-        if req
-            .namespace
-            .as_ref()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-        {
-            return Err(AppError::BadRequest(
-                "namespace and namespaces cannot both be provided".to_string(),
-            ));
-        }
-        if req
-            .payload
-            .collection
-            .as_ref()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-        {
-            return Err(AppError::BadRequest(
-                "payload.collection cannot be used with namespaces".to_string(),
-            ));
-        }
-        let has_star = namespaces.iter().any(|v| v == "*");
-        if has_star && namespaces.len() > 1 {
-            return Err(AppError::BadRequest(
-                "namespaces cannot include '*' with other values".to_string(),
-            ));
-        }
-        if has_star {
-            match req.payload.scope.as_deref() {
-                Some("collection") => {
-                    return Err(AppError::BadRequest(
-                        "namespace='*' conflicts with payload.scope='collection'".to_string(),
-                    ));
-                }
-                Some("all") | None => req.payload.scope = Some("all".to_string()),
-                Some(other) => {
-                    return Err(AppError::BadRequest(format!(
-                        "invalid scope value: {other}"
-                    )));
-                }
-            }
-            req.payload.namespaces = Some(vec!["*".to_string()]);
-            req.payload.collection = None;
-        } else {
-            req.payload.namespaces = Some(namespaces);
-            req.payload.collection = None;
-        }
-        req.namespace = None;
-    }
-
-    if let Some(ns) = req.namespace.clone().filter(|v| !v.trim().is_empty()) {
-        if req
-            .payload
-            .namespaces
-            .as_ref()
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
-        {
-            return Err(AppError::BadRequest(
-                "namespace and namespaces cannot both be provided".to_string(),
-            ));
-        }
-        if ns == "*" {
-            match req.payload.scope.as_deref() {
-                Some("collection") => {
-                    return Err(AppError::BadRequest(
-                        "namespace='*' conflicts with payload.scope='collection'".to_string(),
-                    ));
-                }
-                Some("all") | None => {
-                    req.payload.scope = Some("all".to_string());
-                }
-                Some(other) => {
-                    return Err(AppError::BadRequest(format!(
-                        "invalid scope value: {other}"
-                    )));
-                }
-            }
-            req.payload.collection = None;
-            req.payload.namespaces = Some(vec!["*".to_string()]);
-        } else if let Some(existing) = req
-            .payload
-            .collection
-            .as_ref()
-            .filter(|v| !v.trim().is_empty())
-        {
-            if existing != &ns {
+    let Some(selector) = req.namespace.clone() else {
+        return Ok(());
+    };
+    match selector {
+        NamespaceSelector::Many(raw_list) => {
+            if req
+                .payload
+                .collection
+                .as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
                 return Err(AppError::BadRequest(
-                    "namespace/collection mismatch between top-level and payload".to_string(),
+                    "namespace cannot be provided in both public and normalized request scope"
+                        .to_string(),
                 ));
             }
-        } else {
-            req.payload.collection = Some(ns);
+            let mut namespaces = raw_list
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            namespaces.sort();
+            namespaces.dedup();
+            if namespaces.is_empty() {
+                return Err(AppError::BadRequest(
+                    "namespace array cannot be empty".to_string(),
+                ));
+            }
+            let has_star = namespaces.iter().any(|value| value == "*");
+            if has_star && namespaces.len() > 1 {
+                return Err(AppError::BadRequest(
+                    "namespace array cannot include '*' with other values".to_string(),
+                ));
+            }
+            if has_star {
+                match req.payload.scope.as_deref() {
+                    Some("namespace") => {
+                        return Err(AppError::BadRequest(
+                            "namespace='*' conflicts with payload.scope='namespace'".to_string(),
+                        ));
+                    }
+                    Some("all") | None => req.payload.scope = Some("all".to_string()),
+                    Some(other) => {
+                        return Err(AppError::BadRequest(format!(
+                            "invalid scope value: {other}"
+                        )));
+                    }
+                }
+                req.payload.namespaces = Some(vec!["*".to_string()]);
+            } else {
+                req.payload.namespaces = Some(namespaces);
+            }
+            req.payload.collection = None;
         }
-    }
-
-    if let Some(children) = req.data.as_mut() {
-        for child in children {
-            normalize_request_namespace(child)?;
+        NamespaceSelector::One(ns) => {
+            let ns = ns.trim().to_string();
+            if ns.is_empty() {
+                return Err(AppError::BadRequest(
+                    "namespace cannot be empty".to_string(),
+                ));
+            }
+            if req
+                .payload
+                .namespaces
+                .as_ref()
+                .map(|values| !values.is_empty())
+                .unwrap_or(false)
+            {
+                return Err(AppError::BadRequest(
+                    "namespace conflicts with payload.namespaces".to_string(),
+                ));
+            }
+            if ns == "*" {
+                match req.payload.scope.as_deref() {
+                    Some("namespace") => {
+                        return Err(AppError::BadRequest(
+                            "namespace='*' conflicts with payload.scope='namespace'".to_string(),
+                        ));
+                    }
+                    Some("all") | None => {
+                        req.payload.scope = Some("all".to_string());
+                    }
+                    Some(other) => {
+                        return Err(AppError::BadRequest(format!(
+                            "invalid scope value: {other}"
+                        )));
+                    }
+                }
+                req.payload.collection = None;
+                req.payload.namespaces = Some(vec!["*".to_string()]);
+            } else if let Some(existing) = req
+                .payload
+                .collection
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                if existing != &ns {
+                    return Err(AppError::BadRequest(
+                        "namespace conflicts with the normalized request scope".to_string(),
+                    ));
+                }
+            } else {
+                req.payload.collection = Some(ns);
+            }
         }
     }
     Ok(())
@@ -461,13 +437,14 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
         ))
     })?;
     let (body, toc) = render_docs_markdown(&md);
+    let version = env!("CARGO_PKG_VERSION");
     let page = format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kongo Documentation</title>
+  <title>Kongo {version} Documentation</title>
   <style>
     * {{
       box-sizing: border-box;
@@ -526,6 +503,20 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
       margin: 0.3rem 0 0;
       color: #64748b;
       font-size: 0.75rem;
+      line-height: 1.4;
+    }}
+
+    .docs-version {{
+      display: inline-flex;
+      margin-top: 0.65rem;
+      border: 1px solid #bae6fd;
+      border-radius: 999px;
+      background: #f0f9ff;
+      padding: 0.15rem 0.5rem;
+      color: #0369a1;
+      font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.68rem;
+      font-weight: 700;
       line-height: 1.4;
     }}
 
@@ -766,6 +757,7 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
       <div class="docs-sidebar-header">
         <div class="docs-sidebar-title">Kongo Documentation</div>
         <p class="docs-sidebar-subtitle">Contents</p>
+        <span class="docs-version">Version {version}</span>
       </div>
       <nav class="docs-toc" aria-label="Documentation table of contents">{}</nav>
     </aside>
@@ -852,8 +844,8 @@ pub async fn meta_operations(
     "restore_archive":{{"writes":true,"required":["txn_id|ids|namespace/filter"],"optional":["on_conflict(skip|replace|patch)","dry_run"],"description":"Restore documents from archive. on_conflict controls skip/replace/patch; txn_id maps to archive _txn_id"}},
     "count":{{"writes":false,"required":[],"optional":["namespace|scope=all","filter","include_archive","archive_only","cache"],"description":"Count matching documents"}},
     "aggregate":{{"writes":false,"required":["compute"],"optional":["namespace|scope=all","filter","include_archive","archive_only","cache"],"description":"Set-level compute metrics over matched documents"}},
-    "query":{{"writes":false,"required":["namespace|namespaces|namespace='*'"],"optional":["search","_user_id","attach_users","attach_user_fields(default=id,first_name,last_name,profile_photo)","filter","sort(object|string)","limit","offset","page","per_page","compute","lookups(map)","lookup_depth_override","fields","exclude_fields","include_namespace(include_name)","include_archive","archive_only","explain","cache","force_db"],"description":"Query documents, or run live-document FTS when payload.search is present. Exact _id/_id.$in filters see pending accepted writes unless force_db=true. FTS defaults to _search_score ASC, _created_at DESC"}},
-    "multi_query":{{"writes":false,"required":["queries(array with alias+namespace|namespaces+payload)"],"optional":["on_error(fail|continue, default=fail)"],"description":"Execute multiple independent document queries sequentially on one database and one connection. Each child uses the normal query engine, cache, projection, lookup, FTS, attachments, and pagination behavior"}},
+    "query":{{"writes":false,"required":["namespace(string|string[], '*' allowed)"],"optional":["search","_user_id","attach_users","attach_user_fields(default=id,first_name,last_name,profile_photo)","filter","sort(object|string)","limit","offset","page","per_page","compute","lookups(map)","lookup_depth_override","fields","exclude_fields","include_namespace(include_name)","include_archive","archive_only","explain","cache","force_db"],"description":"Query documents, or run live-document FTS when payload.search is present. Exact _id/_id.$in filters see pending accepted writes unless force_db=true. FTS defaults to _search_score ASC, _created_at DESC"}},
+    "multi_query":{{"writes":false,"required":["operations(array with alias+namespace(string|string[])+payload)"],"optional":["on_error(fail|continue, default=fail)"],"description":"Execute multiple independent document queries sequentially on one database and one connection. Each child uses the normal query engine, cache, projection, lookup, FTS, attachments, and pagination behavior"}},
     "metrics_ingest":{{"writes":true,"required":["events(array<object>)"],"optional":["commit(default=false)"],"description":"Append metric events. events[] requires event; ts defaults to server UTC now; value defaults to 1; dimensions/metadata must be objects when provided"}},
     "metrics_query":{{"writes":false,"required":["event|events","range|start+end","metrics"],"optional":["alias","label","interval","bucket_label","filter","group_by","sort","limit","offset","batch"],"description":"Aggregate metric events into named result sets with groups and metrics labels"}},
     "metrics_catalog":{{"writes":false,"required":[],"optional":["type(event|dimension)","name","value","limit","offset"],"description":"List discovered metrics catalog entries. Ingest registers event names and dimension paths as type/name/value rows"}},
@@ -881,7 +873,7 @@ pub async fn meta_operations(
     "list_jobs":{{"writes":false,"required":[],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)","status","limit","offset"],"description":"List async jobs across supported job types"}},
     "continue_job":{{"writes":true,"required":["job_id"],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)"],"description":"Resume/retry a job when supported by its job type"}},
     "abort_job":{{"writes":true,"required":["job_id"],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)"],"description":"Abort/cancel a job when supported by its job type"}},
-    "transaction":{{"writes":true,"required":["data(array<operation>)"],"optional":["data[].payload.unique_fields","data[].payload.on_conflict(skip|error)"],"description":"Atomically apply insert/update/delete operations. Nested inserts support namespace-scoped composite unique_fields checks inside the active transaction"}}
+    "transaction":{{"writes":true,"required":["payload.operations(array<operation>)"],"optional":["payload.on_error(fail|continue, default=fail)","payload.operations[].payload.unique_fields","payload.operations[].payload.on_conflict(skip|error, default=error)"],"description":"Apply insert/update/upsert/delete operations in one SQL transaction. fail rolls back everything; continue uses per-operation savepoints and commits successful children. Nested inserts support namespace-scoped composite unique_fields checks; nested upserts return inserted/updated/no_change action data"}}
   }}
 }}"#,
         env!("CARGO_PKG_VERSION"),

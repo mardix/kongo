@@ -224,7 +224,7 @@ async fn import_jsonl(
     Ok(GatewayResponse::ok(Some(json!({
         "job_id": job_id,
         "status": "queued",
-        "collection": collection,
+        "namespace": collection,
         "source_path": source_path,
         "source_hash": source_hash,
         "drop_keys": drop_keys,
@@ -413,9 +413,7 @@ async fn continue_job(
                 db: None,
                 operation: "continue_import".to_string(),
                 namespace: None,
-                namespaces: None,
                 payload,
-                data: None,
             },
         )
         .await,
@@ -425,9 +423,7 @@ async fn continue_job(
                 db: None,
                 operation: "continue_export".to_string(),
                 namespace: None,
-                namespaces: None,
                 payload,
-                data: None,
             },
         )
         .await,
@@ -495,9 +491,7 @@ async fn abort_job(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<
                 db: None,
                 operation: "abort_import".to_string(),
                 namespace: None,
-                namespaces: None,
                 payload,
-                data: None,
             },
         )
         .await,
@@ -507,9 +501,7 @@ async fn abort_job(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<
                 db: None,
                 operation: "abort_export".to_string(),
                 namespace: None,
-                namespaces: None,
                 payload,
-                data: None,
             },
         )
         .await,
@@ -1692,7 +1684,7 @@ async fn process_next_import_job_for_db(
                     "IMPORT_JSONL",
                     &json!({
                         "job_id": job_id,
-                        "collection": collection,
+                        "namespace": collection,
                         "source_path": source_path,
                         "read_count": read_count,
                         "inserted_count": inserted_count,
@@ -2207,7 +2199,7 @@ async fn fetch_export_job(conn: &libsql::Connection, job_id: &str) -> AppResult<
 
     Ok(json!({
         "job_id": job_id,
-        "collection": collection,
+        "namespace": collection,
         "payload": payload,
         "target_path": target_path,
         "compress": compress == 1,
@@ -2329,7 +2321,7 @@ async fn fetch_import_job(conn: &libsql::Connection, job_id: &str) -> AppResult<
 
     Ok(json!({
         "job_id": job_id,
-        "collection": collection,
+        "namespace": collection,
         "source_path": source_path,
         "source_hash": source_hash,
         "drop_keys": drop_keys,

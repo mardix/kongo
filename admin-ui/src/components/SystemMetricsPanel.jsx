@@ -163,7 +163,7 @@ function TrafficChart({ buckets }) {
               <div key={`${item.ts || 'empty'}-${idx}`} className="group relative flex min-w-[5px] flex-1 items-end justify-center">
                 <div className={`w-full rounded-t-sm ${requests ? 'bg-primary/75 group-hover:bg-primary' : 'bg-slate-200'}`} style={{ height }} />
                 {errors ? <div className="absolute bottom-0 w-full rounded-t-sm bg-danger/80" style={{ height: errorHeight }} /> : null}
-                <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden min-w-36 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs shadow-lg group-hover:block">
+                <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden min-w-36 -translate-x-1/2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs group-hover:block">
                   <div className="font-mono font-semibold text-slate-900">{formatChartTime(item.ts)}</div>
                   <div className="mt-1 text-slate-600">Requests: <span className="font-mono font-semibold">{formatNumber(requests)}</span></div>
                   <div className="text-slate-600">Errors: <span className="font-mono font-semibold">{formatNumber(errors)}</span></div>

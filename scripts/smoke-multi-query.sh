@@ -111,7 +111,7 @@ SUCCESS_REQUEST='{
   "db":"multi/main",
   "operation":"multi_query",
   "payload":{
-    "queries":[
+    "operations":[
       {"alias":"users","namespace":"users","payload":{"filter":{"status":"active"},"sort":"name asc","fields":["_id","name","orders"],"lookups":{"orders":{"from":"orders","local_field":"_id","foreign_field":"user_id","match":"$eq","multi":true,"limit":10}},"attach_users":true,"page":1,"per_page":1,"cache":true}},
       {"alias":"search_users","namespace":"users","payload":{"search":"Ada","fields":["_id","name","_search_score"],"limit":10}}
     ]
@@ -119,6 +119,7 @@ SUCCESS_REQUEST='{
 }'
 SUCCESS="$(gateway "$SUCCESS_REQUEST")"
 SUCCESS_CACHED="$(gateway "$SUCCESS_REQUEST")"
+MULTI_NAMESPACE="$(gateway '{"db":"multi/main","operation":"query","namespace":["users","orders"],"payload":{"sort":"_id asc","fields":["_id"],"limit":10}}')"
 assert_contains "$SUCCESS" '"status":"success"' "multi_query should succeed"
 assert_contains "$SUCCESS" '"alias":"users"' "users result should retain alias"
 assert_contains "$SUCCESS" '"alias":"search_users"' "FTS result should retain alias"
@@ -131,6 +132,9 @@ assert_contains "$SUCCESS" '"per_page":1' "users child should preserve paginatio
 assert_contains "$SUCCESS" '"succeeded":2' "both children should succeed"
 assert_contains "$SUCCESS" '"failed":0' "successful batch should report no failures"
 assert_contains "$SUCCESS_CACHED" '"succeeded":2' "repeated cache-enabled child queries should succeed"
+assert_contains "$MULTI_NAMESPACE" '"status":"success"' "namespace array query should succeed"
+assert_contains "$MULTI_NAMESPACE" '"_namespace":"users"' "namespace array query should expose the source namespace"
+assert_contains "$MULTI_NAMESPACE" '"_namespace":"orders"' "namespace array query should include every selected namespace"
 
 echo "[7/9] continue after one runtime query error"
 PARTIAL="$(gateway '{
@@ -138,7 +142,7 @@ PARTIAL="$(gateway '{
   "operation":"multi_query",
   "payload":{
     "on_error":"continue",
-    "queries":[
+    "operations":[
       {"alias":"users","namespace":"users","payload":{"limit":1}},
       {"alias":"broken","namespace":"orders","payload":{"sort":"name sideways"}}
     ]
@@ -156,7 +160,7 @@ FAIL_FAST="$(gateway '{
   "db":"multi/main",
   "operation":"multi_query",
   "payload":{
-    "queries":[
+    "operations":[
       {"alias":"users","namespace":"users","payload":{"limit":1}},
       {"alias":"broken","namespace":"orders","payload":{"sort":"name sideways"}}
     ]
@@ -166,11 +170,15 @@ assert_contains "$FAIL_FAST" '"status":"error"' "default fail mode should fail r
 assert_contains "$FAIL_FAST" 'sort direction' "fail-fast error should preserve query error"
 
 echo "[9/9] enforce structural validation and configured batch cap"
-DUPLICATE="$(gateway '{"db":"multi/main","operation":"multi_query","payload":{"queries":[{"alias":"same","namespace":"users","payload":{}},{"alias":"same","namespace":"orders","payload":{}}]}}')"
-MISSING_SCOPE="$(gateway '{"db":"multi/main","operation":"multi_query","payload":{"queries":[{"alias":"users","payload":{}}]}}')"
-OVERSIZED="$(gateway '{"db":"multi/main","operation":"multi_query","payload":{"queries":[{"alias":"one","namespace":"users","payload":{}},{"alias":"two","namespace":"orders","payload":{}},{"alias":"three","namespace":"users","payload":{}}]}}')"
+DUPLICATE="$(gateway '{"db":"multi/main","operation":"multi_query","payload":{"operations":[{"alias":"same","namespace":"users","payload":{}},{"alias":"same","namespace":"orders","payload":{}}]}}')"
+MISSING_SCOPE="$(gateway '{"db":"multi/main","operation":"multi_query","payload":{"operations":[{"alias":"users","payload":{}}]}}')"
+LEGACY_NAMESPACES="$(gateway '{"db":"multi/main","operation":"multi_query","payload":{"operations":[{"alias":"users","namespaces":["users"],"payload":{}}]}}')"
+OVERSIZED="$(gateway '{"db":"multi/main","operation":"multi_query","payload":{"operations":[{"alias":"one","namespace":"users","payload":{}},{"alias":"two","namespace":"orders","payload":{}},{"alias":"three","namespace":"users","payload":{}}]}}')"
+LEGACY_QUERIES="$(gateway '{"db":"multi/main","operation":"multi_query","payload":{"queries":[{"alias":"users","namespace":"users","payload":{}}]}}')"
 assert_contains "$DUPLICATE" 'alias must be unique' "duplicate aliases should be rejected"
-assert_contains "$MISSING_SCOPE" 'requires namespace or namespaces' "child namespace should be required"
+assert_contains "$MISSING_SCOPE" 'requires namespace' "child namespace should be required"
+assert_contains "$LEGACY_NAMESPACES" 'requires namespace' "removed child namespaces selector should be rejected"
 assert_contains "$OVERSIZED" 'configured maximum of 2' "configured child cap should be enforced"
+assert_contains "$LEGACY_QUERIES" 'multi_query operations is required' "removed payload.queries shape should be rejected"
 
 echo "multi-query smoke passed. log: $LOG_FILE"

@@ -115,36 +115,32 @@ Use this envelope for all RPC calls sent to the gateway.
 }
 ```
 
-Use `namespaces:["users","admins"]` instead of `namespace` when an operation supports a multi-namespace read. The two selectors are mutually exclusive.
+For a multi-namespace read, set the same field to an array: `namespace:["users","admins"]`.
 
 ### Rules
 These rules explain how request fields are normalized and validated before dispatch.
 - `db` is required for database-scoped operations. Commands explicitly marked global, such as instance inventory and system runtime statistics, may omit it.
-- Canonical request shape is explicit: `db` + `operation` + `namespace|namespaces` + `payload`.
-- `namespace` is top-level canonical selector.
-- `namespaces` (top-level) selects multiple namespaces.
-- `collection` is an alias for `namespace` (top-level alias, and `payload.collection` accepted).
-- If both `namespace` and `payload.collection` are provided, they must match.
-- `namespace` and `namespaces` cannot both be provided.
+- Canonical request shape is explicit: `db` + `operation` + optional `namespace` + `payload`.
+- `namespace` is the only public namespace selector. It accepts a string for one namespace or a non-empty string array for several namespaces.
 - Optional shorthand alias is supported:
   - `operation: "query::users"` => `operation="query"`, `namespace="users"`
   - `operation: "query::*"` => `operation="query"`, `namespace="*"`
-  - `operation: "query::users,admins,teams"` => `operation="query"`, `namespaces=["users","admins","teams"]`
-  - shorthand cannot be combined with top-level `namespace` or `namespaces`
+  - `operation: "query::users,admins,teams"` => `operation="query"`, `namespace=["users","admins","teams"]`
+  - shorthand cannot be combined with top-level `namespace`
 - Namespace policy:
   - Required: `insert`, `query`.
-  - For `insert` and upsert-insert paths, namespace must be a single concrete value (no `namespace="*"` and no `namespaces:[...]`).
+  - For `insert` and upsert-insert paths, namespace must be a single concrete string (no `namespace="*"` and no array).
   - ID-targeted `update` and `delete` allow namespace omission; if provided, it is strict.
   - Global ID reads use `query` with `namespace="*"` and an explicit `_id` or `_id.$in` filter.
 - Filter/wide destructive ops require namespace unless explicit `scope=all` where supported (`update` filter mode, `delete` filter mode, `set_ttl` filter mode, namespace-level ops).
 - Namespace wildcard alias:
   - `namespace: "*"` maps to `payload.scope: "all"` for operations that support `scope=all`.
-  - It conflicts with `payload.scope: "collection"`.
+  - It conflicts with `payload.scope: "namespace"`.
 - `_namespace` response field:
   - hidden by default
   - enabled globally with `KONGODB_RESPONSE_INCLUDE_NAMESPACE=true`
   - per-request override with `payload.include_namespace` (alias `payload.include_name`)
-  - always auto-included for `query` when using `namespace="*"` or `namespaces:[...]`
+  - always auto-included for `query` when using `namespace="*"` or a namespace array
 - DB creation is only allowed by:
   - `create_db`
   - `insert`
@@ -184,8 +180,6 @@ Use this table as the quick reference for common payload keys and their meanings
 
 | Field | Type | Description |
 |---|---|---|
-| `collection` | string | Alias of top-level `namespace` |
-| `namespaces` | string[] | Multi-namespace selector (top-level alias via request normalization) |
 | `search` | string | Optional FTS text for `query` (alias: `q`); when present, query uses live-document FTS5 |
 | `from_namespace` | string | Source namespace for `change_namespace` and `rename_namespace` |
 | `to_namespace` | string | Target namespace for `change_namespace` |
@@ -206,7 +200,7 @@ Use this table as the quick reference for common payload keys and their meanings
 | `on_conflict` | string | Conflict policy (op-specific) |
 | `commit` | bool | Per-request write ack override: `true` committed, `false` accepted |
 | `force_db` | bool | For `query` with an explicit `_id`/`_id.$in` filter, bypass pending accepted-write overlay and read only durable DB state |
-| `alias` | string | Metric Events result alias, or required unique child result name inside `multi_query.queries[]` |
+| `alias` | string | Metric Events result alias, optional transaction result name, or required unique child result name inside `multi_query.operations[]` |
 | `label` | string | Metric Events result label; supports templates like `{{start YYYY-MM-DD}}` |
 | `event` | string | Metric Events event selector or tracked event name |
 | `events` | array | Metric Events track events array, or metrics query event-name array |
@@ -263,8 +257,8 @@ Use this table as the quick reference for common payload keys and their meanings
 | `bucket_label` | string | Metric Events item bucket label template, e.g. `{{bucket HH:mm}}` |
 | `metrics` | array | Metric Events metric definitions |
 | `batch` | array | Multiple metric events queries in one `metrics_query` request |
-| `queries` | array | Read-only `multi_query` child queries; each item has `alias`, `namespace|namespaces`, and a normal query `payload` |
-| `on_error` | string | `multi_query` runtime error policy: `fail` (default) or `continue` |
+| `operations` | array | Child envelopes for `multi_query` and `transaction`; required child fields depend on the outer operation |
+| `on_error` | string | `multi_query` or `transaction` runtime policy: `fail` (default) or `continue` |
 | `unique_fields` | string[] | Insert-family soft uniqueness paths (dot notation) |
 | `ignore_input_id` | bool | Import: ignore `_id` and `id` from input; `_key` remains ordinary document data |
 | `resumable` | bool | Import job resumable flag |
@@ -304,14 +298,14 @@ Use this table as the quick reference for common payload keys and their meanings
 | `lookup_depth_override` | int | Per-request lookup depth override |
 | `sort` | object\\|string | Sort definition |
 | `fields` | string[] | Include projection paths |
-| `exclude_fields` | string[] | Exclude projection paths (`_id` and document `_user_id` are kept when present) |
+| `exclude_fields` | string[] | Exclude projection paths (`_id`, document `_user_id`, and an included `_namespace` are kept when present) |
 | `limit` | int | Page size |
 | `offset` | int | Page offset |
 | `page` | int | Page number alias (used when `limit/offset` are not provided) |
 | `per_page` | int | Page size alias (used when `limit/offset` are not provided) |
 | `max_docs` | int | Write cap: `-1` all, `0` no-op, `1+` cap |
 | `dry_run` | bool | Simulation mode (no write) |
-| `scope` | string | `collection` (default) or `all` |
+| `scope` | string | `namespace` (default) or `all` |
 | `include_archive` | bool | Read source: include archive |
 | `archive_only` | bool | Read source: archive only |
 | `explain` | bool | Query explain/debug mode |
@@ -334,8 +328,7 @@ These rules define the accepted timestamp format for system-managed date fields.
 These fields select records and control how widely an operation can scan.
 - `id: string`
 - `ids: string[]`
-- `scope: "collection"|"all"` (default `collection`)
-- `collection: string` (alias of top-level `namespace`)
+- `scope: "namespace"|"all"` (default `namespace`)
 
 ### Data Write Payloads
 These fields carry document bodies and write-related execution controls.
@@ -441,8 +434,8 @@ Use this catalog to find an operation by task. The detailed reference follows in
 | `update` | Explicit `_id` data or `filter + data` | Patch existing documents, apply Mutation Operators, or replace one known document. Never inserts. |
 | `upsert` | `namespace`, `filter`, `insert_data` | Update filter matches or insert one document when none exist. |
 | `count` | `namespace` or `scope:"all"` | Return only the number of matching live/archive documents. |
-| `query` | `namespace`, `namespaces`, or `namespace:"*"` | Return documents with Filter Operators, pagination, sorting, projection, FTS, lookups, compute, and attachments. |
-| `multi_query` | `payload.queries[]` with unique `alias` and namespace selector | Execute several independent read-only document queries against one database in one HTTP request. |
+| `query` | `namespace` string, string array, or `"*"` | Return documents with Filter Operators, pagination, sorting, projection, FTS, lookups, compute, and attachments. |
+| `multi_query` | `payload.operations[]` with unique `alias` and namespace selector | Execute several independent read-only document queries against one database in one HTTP request. |
 | `aggregate` | `compute`, namespace or all scope | Compute set-level counts, sums, averages, extrema, and distinct values. |
 | `delete` | Exactly one of `id`, `ids`, `filter` | Soft-delete into archive by default or hard-delete with `purge:true`. |
 | `set_ttl` | `ids` or `filter`, plus `ttl_seconds` | Schedule document expiration or clear an existing TTL. |
@@ -453,7 +446,7 @@ Use this catalog to find an operation by task. The detailed reference follows in
 | `retry_transition` | Transition selector | Explicitly reopen a failed transition; failures do not auto-retry. |
 | `import_jsonl` | `namespace`, `source_path` | Queue streaming/resumable JSONL ingestion from local storage or S3. |
 | `export_jsonl` | Namespace or all scope | Queue filtered/projection-aware JSONL export to local storage or S3. |
-| `transaction` | Top-level `data[]` | Atomically run supported insert, update, and delete operations against one database. |
+| `transaction` | `payload.operations[]` | Run insert, update, upsert, and delete children in one SQL transaction with fail-fast or savepoint-isolated continuation. |
 
 ### Product Stores
 
@@ -613,7 +606,7 @@ These examples show the most common filtering patterns used with read operations
 |---|---|---|
 | `Equality + range` | field paths + scalar/range values | `{ \"status\": {\"$eq\":\"active\"}, \"age\": {\"$gte\":18, \"$lte\":65} }` |
 | `Boolean logic` | `$and/$or` arrays | Combine filters with nested logical groups |
-| `Array matching` | array fields | Use `$all`, `$any`, `$none`, `$elemMatch` for collection semantics |
+| `Array matching` | array fields | Use `$all`, `$any`, `$none`, `$elemMatch` for set/array semantics |
 | `String matching` | string fields | Use `$icontains`, `$startsWith`, `$regex`, etc. |
 | `Nested path + exists/type` | dot paths | Example: `profile.age`, `profile.phone`, `profile.meta` with `$between/$exists/$type` |
 
@@ -662,7 +655,7 @@ Creates one or many new JSON documents in one namespace. Use `insert` when the r
 ##### Requirements
 
 - Top-level `namespace` is required and must be one concrete namespace.
-- `namespace:"*"` and `namespaces:[...]` are rejected.
+- `namespace:"*"` and namespace arrays are rejected.
 - `payload.data` must be either one non-empty object or a non-empty array of objects.
 
 ##### Options
@@ -805,7 +798,7 @@ By default, update data is a JSON merge patch: supplied fields are changed, unto
 | `replace` | bool | `false` | Fully replaces one explicit-ID document while preserving `_id`. Rejected for arrays and filter mode. |
 | `lifecycle` | object or object[] | None | Single explicit-ID mode only. Atomically creates or replaces named transitions after the update. Existing transitions with other names remain. |
 | `max_docs` | int | All matches | Caps filter mode. `-1` all, `0` no changes, positive values cap changes. |
-| `scope` | string | `collection` | Use `all` only for an intentional cross-namespace filter update. |
+| `scope` | string | `namespace` | Use `all` only for an intentional cross-namespace filter update. |
 | `commit` | bool | Runtime default | Selects committed or accepted acknowledgement. |
 | `dry_run` | bool | `false` | Validates the request and reports matched/update counts without writing. |
 
@@ -980,57 +973,311 @@ With `max_docs:0`, existing matches remain unchanged and `update_data` is option
 }
 ```
 
-#### `count`
 
-Returns only the number of documents matched by namespace, filter, user scope, and archive source. Use `count` for totals, existence checks, dashboards, and pagination metadata when document bodies are unnecessary. It is cheaper and smaller than querying documents solely to count them.
+#### `delete`
+
+Removes one or many live documents. By default deletion is recoverable: Kongo copies each matched document to `__kdb_archive`, preserves its original timestamps and namespace, assigns one `_txn_id` to the operation, and then removes it from the live table. Use `purge:true` only when the data must be permanently removed without entering the archive.
+
+##### Selectors
+
+Exactly one selector is required:
+
+| Selector | Namespace rule | Use case |
+|---|---|---|
+| `id` | Optional; strict if supplied | Delete one globally unique document ID. |
+| `ids` | Optional; strict if supplied | Delete several explicit IDs. |
+| `filter` | Required unless `scope:"all"` | Delete documents selected by Filter Operators. |
 
 ##### Options
 
 | Property | Type | Default | Description |
 |---|---:|---:|---|
-| `filter` | object | `{}` | Conditions composed from Filter Operators. |
-| `_user_id` | string | None | Restricts results to the document-table user reference. |
-| `scope` | string | `collection` | `collection` requires a namespace; `all` counts across namespaces. `namespace:"*"` normalizes to `all`. |
-| `include_archive` | bool | `false` | Counts live and archived documents together. |
-| `archive_only` | bool | `false` | Counts archived documents only. |
-| `cache` | bool or int | Configured default | Controls read caching. See Cache Behavior. |
+| `id` | string | None | One explicit document ID. |
+| `ids` | string[] | None | Explicit document IDs. Cannot be combined with `id` or `filter`. |
+| `filter` | object | None | Non-empty filter expression. |
+| `purge` | bool | `false` | `false` performs a soft delete; `true` permanently deletes live rows. |
+| `ttl_seconds` | int | Configured delete TTL or none | Positive retention time for newly archived rows. Ignored with `purge:true`. |
+| `max_docs` | int | All selected | Caps explicit IDs or filter matches. |
+| `scope` | string | `namespace` | `all` permits an intentional cross-namespace filter delete. |
+| `commit` | bool | Runtime default | Selects committed or accepted acknowledgement. |
+| `dry_run` | bool | `false` | Reports targets without deleting or archiving them. |
 
-##### Count in One Namespace
+##### Soft-Delete One ID Globally
 
 ```json
 {
   "db": "myapp/main",
-  "operation": "count",
+  "operation": "delete",
+  "payload": {
+    "id": "u1"
+  }
+}
+```
+
+##### Soft-Delete Explicit IDs Strictly Within a Namespace
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "delete",
   "namespace": "users",
   "payload": {
-    "filter": {"status": "active"},
-    "cache": true
+    "ids": ["u1", "u2"],
+    "ttl_seconds": 604800
   }
 }
 ```
 
-##### Count Across All Namespaces
+##### Delete by Filter With a Safety Cap
 
 ```json
 {
   "db": "myapp/main",
-  "operation": "count",
-  "namespace": "*",
+  "operation": "delete",
+  "namespace": "sessions",
   "payload": {
-    "_user_id": "f9c1b3a9e2a84f9aa0bdb88e8c12f001",
-    "include_archive": true
+    "filter": {
+      "status": "expired",
+      "last_seen": {"$lt": "2026-01-01T00:00:00Z"}
+    },
+    "max_docs": 1000,
+    "dry_run": true
   }
 }
 ```
 
-##### Response
+##### Permanently Purge Live Documents
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "delete",
+  "payload": {
+    "ids": ["temporary-1", "temporary-2"],
+    "purge": true
+  }
+}
+```
+
+A successful soft delete returns `_txn_id`, which can later be passed to `restore_archive` or `purge_archive`.
+
+
+
+#### `transaction`
+
+Applies a sequence of document mutations inside one SQL transaction. The default `on_error:"fail"` policy is all-or-nothing; optional `continue` mode isolates failed children with savepoints and commits the successful children. Nested operations may target different namespaces, but they always use the single database selected by the outer `db` field.
+
+Transaction entries are provided in `payload.operations`. Each entry is a complete nested operation envelope with its own `operation`, namespace selector, and `payload`; the outer `db` applies to all entries.
+
+##### Requirements
+
+- Top-level `db` selects the database for every nested operation.
+- `payload.operations` must be a non-empty array of operation envelopes.
+- Supported nested operations are `insert`, `update`, `upsert`, and `delete`.
+- Each nested operation supplies its own `namespace` and `payload` as required by that operation.
+- A nested operation cannot override the outer database.
+- `payload.on_error` accepts `fail` (default) or `continue`.
+- With `fail`, the first nested runtime error rolls back the entire transaction.
+- With `continue`, every child runs under its own SQLite savepoint. A failed child is rolled back to its savepoint, remaining children continue, and successful children commit together at the end.
+- Nested `insert` supports `unique_fields` and `on_conflict:"skip"|"error"`. The check runs inside the active transaction, so it sees both existing documents and earlier nested inserts.
+- Nested transaction inserts default `on_conflict` to `error`, unlike standalone insert. An explicit `skip` is treated as a successful no-op and is independent of `on_error`.
+- A skipped unique insert does not create its document or lifecycle transitions. The transaction response reports the number under `skipped_count`.
+- Nested `upsert` preserves the standalone filter, `insert_data`, `update_data`, `max_docs`, TTL, expiry behavior, Mutation Operator, dry-run, `_user_id`, and singular lifecycle behavior.
+- Every nested upsert evaluates its filter against the transaction's current state. It therefore sees mutations made by earlier children before the outer commit.
+- Upsert result entries include `data.action` as `inserted`, `updated`, or `no_change`, plus the normal item and count fields.
+
+##### Batch Options
+
+| Property | Type | Default | Description |
+|---|---:|---:|---|
+| `operations` | object[] | Required | Non-empty ordered list of `insert`, `update`, `upsert`, or `delete` child envelopes. |
+| `on_error` | string | `fail` | `fail` rolls back everything on the first runtime error. `continue` rolls back only the failed child savepoint and continues. |
+
+Every child requires `operation` and its normal operation-specific `payload`. `namespace` is required or optional according to the nested operation's normal ID/filter targeting rules. Child `alias` is optional and, when supplied, is repeated in the corresponding result entry.
+
+##### Example
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "transaction",
+  "payload": {
+    "operations": [
+      {
+        "operation": "insert",
+        "namespace": "users",
+        "payload": {
+          "data": {"_id": "u1", "name": "Ada"}
+        }
+      },
+      {
+        "operation": "update",
+        "namespace": "accounts",
+        "payload": {
+          "data": {"_id": "account-1", "owner_id": "u1"}
+        }
+      }
+    ]
+  }
+}
+```
+
+Use `transaction` for short, related mutation sets. Large ingestion remains better suited to `insert` with array data or the resumable `import_jsonl` job.
+
+##### Transactional Upsert
+
+Use nested upserts when related conditional writes must commit together. The insert path requires a concrete namespace. The default `max_docs:1` prevents an unexpectedly broad update; `0` provides insert-if-absent behavior, and `-1` updates every match.
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "transaction",
+  "payload": {
+    "operations": [
+      {
+        "alias": "ensure-user",
+        "operation": "upsert",
+        "namespace": "users",
+        "payload": {
+          "filter": {"email": "ada@example.com"},
+          "insert_data": {
+            "email": "ada@example.com",
+            "login_count": 1
+          },
+          "update_data": {
+            "login_count": {"$inc": 1}
+          },
+          "max_docs": 1
+        }
+      }
+    ]
+  }
+}
+```
+
+The corresponding child result identifies which branch ran:
+
+```json
+{
+  "index": 0,
+  "alias": "ensure-user",
+  "operation": "upsert",
+  "namespace": "users",
+  "status": "success",
+  "data": {
+    "action": "updated",
+    "count": 1,
+    "matched_count": 1,
+    "updated_count": 1,
+    "inserted_count": 0,
+    "items": [
+      {
+        "_id": "7c93f1738dd9472280c56b04cef1209c",
+        "email": "ada@example.com",
+        "login_count": 2
+      }
+    ]
+  }
+}
+```
+
+Transaction-level `on_error` controls an upsert failure. Under `fail`, it rolls back the entire transaction. Under `continue`, Kongo rolls back that child's savepoint and continues. Nested upsert does not redefine insert's `on_conflict` policy.
+
+##### Insert With Composite Uniqueness
+
+`on_conflict:"skip"` keeps the transaction running when the composite value already exists. Use `"error"` when a conflict must roll back every nested operation.
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "transaction",
+  "payload": {
+    "operations": [
+      {
+        "operation": "insert",
+        "namespace": "users",
+        "payload": {
+          "data": {
+            "tenant": {"id": "tenant_01"},
+            "profile": {"email": "ada@example.com"},
+            "name": "Ada"
+          },
+          "unique_fields": ["tenant.id", "profile.email"],
+          "on_conflict": "error"
+        }
+      }
+    ]
+  }
+}
+```
+
+Transaction responses keep `count` as the number of nested operation envelopes. `succeeded`, `failed`, and `skipped_count` partition the outcomes; `results[]` preserves request order:
 
 ```json
 {
   "status": "success",
-  "data": {"count": 42}
+  "data": {
+    "count": 2,
+    "succeeded": 1,
+    "failed": 0,
+    "skipped_count": 1,
+    "results": [
+      {
+        "index": 0,
+        "operation": "insert",
+        "namespace": "users",
+        "status": "success"
+      },
+      {
+        "index": 1,
+        "operation": "insert",
+        "namespace": "users",
+        "status": "skipped",
+        "reason": {
+          "code": "unique_fields_conflict",
+          "message": "insert skipped by on_conflict policy"
+        }
+      }
+    ],
+    "message": "transaction_committed"
+  },
+  "committed": true,
+  "is_async_ack": false
 }
 ```
+
+##### Continue After a Failed Child
+
+Use `continue` only when successful children may be committed independently of failed children. This is a partial transaction policy, not all-or-nothing atomicity.
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "transaction",
+  "payload": {
+    "on_error": "continue",
+    "operations": [
+      {
+        "alias": "create-user",
+        "operation": "insert",
+        "namespace": "users",
+        "payload": {"data": {"_id": "u1", "name": "Ada"}}
+      },
+      {
+        "alias": "broken-update",
+        "operation": "update",
+        "namespace": "accounts",
+        "payload": {"data": {"plan": "pro"}}
+      }
+    ]
+  }
+}
+```
+
+The update fails because `data._id` is missing. Its savepoint is rolled back, the insert commits, and the response has `status:"partial"`, `succeeded:1`, and `failed:1`. Structural errors such as a missing child `operation`, unsupported operation name, empty batch, or invalid `on_error` are rejected before the SQL transaction begins.
+
+
+
 
 #### `query`
 
@@ -1043,7 +1290,7 @@ Use `query` when you need document bodies, pagination, sorting, field projection
 | Selector | Behavior |
 |---|---|
 | `namespace:"users"` | Reads one namespace. |
-| `namespaces:["users","admins"]` | Reads several namespaces and automatically includes `_namespace`. |
+| `namespace:["users","admins"]` | Reads several namespaces and automatically includes `_namespace`. |
 | `namespace:"*"` | Reads all namespaces and automatically includes `_namespace`. |
 | `operation:"query::users"` | Shorthand for one namespace. |
 | `operation:"query::users,admins"` | Shorthand for multiple namespaces. |
@@ -1061,8 +1308,8 @@ Use `query` when you need document bodies, pagination, sorting, field projection
 | `offset` | int | `0` | Zero-based row offset. If `limit` or `offset` is supplied, offset mode takes precedence. |
 | `page` | int | `1` | One-based page number when offset mode is not used. |
 | `per_page` | int | Configured query limit | Page size used with `page`. |
-| `fields` | string[] | All | Includes only selected paths. `_id` and `_user_id` are retained when present. |
-| `exclude_fields` | string[] | `[]` | Removes selected paths after inclusion. `_id` and `_user_id` cannot be excluded. |
+| `fields` | string[] | All | Includes only selected paths. `_id`, `_user_id`, and an automatically included `_namespace` are retained when present. |
+| `exclude_fields` | string[] | `[]` | Removes selected paths after inclusion. `_id`, `_user_id`, and an included `_namespace` cannot be excluded. |
 | `include_namespace` | bool | Configured response setting | Adds `_namespace` to items. Alias: `include_name`. Automatically enabled for multi/all namespace reads. |
 | `include_archive` | bool | `false` | Reads live and archived documents. Not available in FTS mode. |
 | `archive_only` | bool | `false` | Reads archived documents only. Not available in FTS mode. |
@@ -1230,7 +1477,7 @@ Children execute sequentially on the same open database connection in request or
   "operation": "multi_query",
   "payload": {
     "on_error": "fail",
-    "queries": [
+    "operations": [
       {
         "alias": "users",
         "namespace": "users",
@@ -1261,7 +1508,7 @@ Children execute sequentially on the same open database connection in request or
 
 | Property | Type | Default | Description |
 |---|---:|---:|---|
-| `queries` | object[] | Required | Between 1 and `KONGODB_QUERY_MULTI_MAX_QUERIES` independent child queries. |
+| `operations` | object[] | Required | Between 1 and `KONGODB_QUERY_MULTI_MAX_QUERIES` independent child queries. |
 | `on_error` | string | `fail` | `fail` returns the first runtime error as a request error. `continue` returns successful and failed child results together. |
 
 ##### Child Query Shape
@@ -1269,11 +1516,11 @@ Children execute sequentially on the same open database connection in request or
 | Property | Type | Required | Description |
 |---|---:|---:|---|
 | `alias` | string | Yes | Non-empty unique result identifier. Results preserve request order and repeat this alias. |
-| `namespace` | string | One selector | One namespace or `"*"`. |
-| `namespaces` | string[] | One selector | One or more namespaces. Cannot be combined with `namespace`; `"*"` cannot be combined with other values. |
+| `namespace` | string or string[] | Yes | One namespace, several namespaces, or `"*"`. Arrays must be non-empty; `"*"` cannot be combined with other values. |
+| `operation` | string | No | May be omitted because `query` is implied. If supplied, it must be `query`. |
 | `payload` | object | No | Any normal `query` payload, including `filter`, `search`, pagination, projection, lookup, compute, attachments, archive controls, `force_db`, and `cache`. |
 
-Namespace selectors must be properties of the child query item, not inside its `payload`. Empty batches, missing or duplicate aliases, missing selectors, conflicting selectors, nested `queries`, invalid `on_error`, and oversized batches are rejected before any child executes.
+The namespace selector must be a property of the child query item, not inside its `payload`. Empty batches, missing or duplicate aliases, missing selectors, nested `operations`, invalid `on_error`, and oversized batches are rejected before any child executes. The removed `payload.queries` and `namespaces` shapes are not accepted.
 
 ##### Structured and Full-Text Queries Together
 
@@ -1282,7 +1529,7 @@ Namespace selectors must be properties of the child query item, not inside its `
   "db": "myapp/main",
   "operation": "multi_query",
   "payload": {
-    "queries": [
+    "operations": [
       {
         "alias": "recent_users",
         "namespace": "users",
@@ -1361,7 +1608,7 @@ Each successful child `data` object is exactly the value that the same standalon
   "operation": "multi_query",
   "payload": {
     "on_error": "continue",
-    "queries": [
+    "operations": [
       {"alias": "users", "namespace": "users", "payload": {"limit": 10}},
       {"alias": "orders", "namespace": "orders", "payload": {"sort": "name sideways"}}
     ]
@@ -1397,6 +1644,59 @@ Each successful child `data` object is exactly the value that the same standalon
 
 `partial` is returned only when `on_error:"continue"` captures at least one runtime failure. With the default `on_error:"fail"`, the first runtime error ends execution and uses the normal gateway error response. Structural validation always fails the whole request before execution, regardless of `on_error`.
 
+
+#### `count`
+
+Returns only the number of documents matched by namespace, filter, user scope, and archive source. Use `count` for totals, existence checks, dashboards, and pagination metadata when document bodies are unnecessary. It is cheaper and smaller than querying documents solely to count them.
+
+##### Options
+
+| Property | Type | Default | Description |
+|---|---:|---:|---|
+| `filter` | object | `{}` | Conditions composed from Filter Operators. |
+| `_user_id` | string | None | Restricts results to the document-table user reference. |
+| `scope` | string | `namespace` | `namespace` requires a selected namespace; `all` counts across namespaces. `namespace:"*"` normalizes to `all`. |
+| `include_archive` | bool | `false` | Counts live and archived documents together. |
+| `archive_only` | bool | `false` | Counts archived documents only. |
+| `cache` | bool or int | Configured default | Controls read caching. See Cache Behavior. |
+
+##### Count in One Namespace
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "count",
+  "namespace": "users",
+  "payload": {
+    "filter": {"status": "active"},
+    "cache": true
+  }
+}
+```
+
+##### Count Across All Namespaces
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "count",
+  "namespace": "*",
+  "payload": {
+    "_user_id": "f9c1b3a9e2a84f9aa0bdb88e8c12f001",
+    "include_archive": true
+  }
+}
+```
+
+##### Response
+
+```json
+{
+  "status": "success",
+  "data": {"count": 42}
+}
+```
+
 #### `aggregate`
 
 Computes set-level values over all documents matched by a namespace and filter. Unlike `query.compute`, which computes a value independently for each returned item, `aggregate` summarizes the whole matched set and returns no document list.
@@ -1409,7 +1709,7 @@ Use it for totals, sums, averages, extrema, and distinct value lists without tra
 |---|---:|---:|---|
 | `compute` | object | Required | Named aggregate expressions using `$count`, `$sum`, `$avg`, `$min`, `$max`, or `$distinct`. |
 | `filter` | object | `{}` | Filter expression applied before aggregation. |
-| `scope` | string | `collection` | Use one namespace or `all`/`namespace:"*"`. |
+| `scope` | string | `namespace` | Use one namespace or `all`/`namespace:"*"`. |
 | `include_archive` | bool | `false` | Aggregates live and archived documents. |
 | `archive_only` | bool | `false` | Aggregates archived documents only. |
 | `cache` | bool or int | Configured default | Controls result caching. |
@@ -1456,93 +1756,6 @@ Use it for totals, sums, averages, extrema, and distinct value lists without tra
 }
 ```
 
-#### `delete`
-
-Removes one or many live documents. By default deletion is recoverable: Kongo copies each matched document to `__kdb_archive`, preserves its original timestamps and namespace, assigns one `_txn_id` to the operation, and then removes it from the live table. Use `purge:true` only when the data must be permanently removed without entering the archive.
-
-##### Selectors
-
-Exactly one selector is required:
-
-| Selector | Namespace rule | Use case |
-|---|---|---|
-| `id` | Optional; strict if supplied | Delete one globally unique document ID. |
-| `ids` | Optional; strict if supplied | Delete several explicit IDs. |
-| `filter` | Required unless `scope:"all"` | Delete documents selected by Filter Operators. |
-
-##### Options
-
-| Property | Type | Default | Description |
-|---|---:|---:|---|
-| `id` | string | None | One explicit document ID. |
-| `ids` | string[] | None | Explicit document IDs. Cannot be combined with `id` or `filter`. |
-| `filter` | object | None | Non-empty filter expression. |
-| `purge` | bool | `false` | `false` performs a soft delete; `true` permanently deletes live rows. |
-| `ttl_seconds` | int | Configured delete TTL or none | Positive retention time for newly archived rows. Ignored with `purge:true`. |
-| `max_docs` | int | All selected | Caps explicit IDs or filter matches. |
-| `scope` | string | `collection` | `all` permits an intentional cross-namespace filter delete. |
-| `commit` | bool | Runtime default | Selects committed or accepted acknowledgement. |
-| `dry_run` | bool | `false` | Reports targets without deleting or archiving them. |
-
-##### Soft-Delete One ID Globally
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "delete",
-  "payload": {
-    "id": "u1"
-  }
-}
-```
-
-##### Soft-Delete Explicit IDs Strictly Within a Namespace
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "delete",
-  "namespace": "users",
-  "payload": {
-    "ids": ["u1", "u2"],
-    "ttl_seconds": 604800
-  }
-}
-```
-
-##### Delete by Filter With a Safety Cap
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "delete",
-  "namespace": "sessions",
-  "payload": {
-    "filter": {
-      "status": "expired",
-      "last_seen": {"$lt": "2026-01-01T00:00:00Z"}
-    },
-    "max_docs": 1000,
-    "dry_run": true
-  }
-}
-```
-
-##### Permanently Purge Live Documents
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "delete",
-  "payload": {
-    "ids": ["temporary-1", "temporary-2"],
-    "purge": true
-  }
-}
-```
-
-A successful soft delete returns `_txn_id`, which can later be passed to `restore_archive` or `purge_archive`.
-
 #### `set_ttl`
 
 Schedules selected live documents for future expiration or clears their existing expiration. Use it when retention is decided after insertion, such as expiring sessions, temporary exports, invitations, or stale application records.
@@ -1558,7 +1771,7 @@ When a document reaches `_expires_at`, the reaper uses `_expiry_behavior`: `arch
 | `ttl_seconds` | int | Required | Positive seconds schedule expiration; `0` clears `_expires_at`. Negative values are rejected. |
 | `expiry_behavior` | string | Existing value | Sets `archive` or `delete`; omitted leaves each document's behavior unchanged. Unknown supplied values normalize to `archive`. |
 | `max_docs` | int | All selected | Caps selected IDs or filter matches. |
-| `scope` | string | `collection` | `all` permits cross-namespace filter targeting. |
+| `scope` | string | `namespace` | `all` permits cross-namespace filter targeting. |
 | `commit` | bool | Runtime default | Selects committed or accepted acknowledgement. |
 | `dry_run` | bool | `false` | Reports selected rows without changing TTL. |
 
@@ -1699,7 +1912,7 @@ An explicit-ID update may atomically alter a document and schedule multiple inde
 
 `upsert` also accepts lifecycle when `max_docs` is exactly `1`. The transition is attached to the one updated or inserted document. `max_docs:0`, `-1`, and values greater than one are rejected when lifecycle is present.
 
-Inside `transaction`, supported singular `insert` and explicit-ID `update` entries may also carry lifecycle definitions; their document mutation and transition rows commit or roll back together. A transactional soft delete cancels pending transitions for its document.
+Inside `transaction`, supported singular `insert`, explicit-ID `update`, and `upsert` entries with `max_docs:1` may also carry lifecycle definitions; their document mutation and transition rows commit or roll back together. A transactional soft delete cancels pending transitions for its document.
 
 Committed write responses include scheduling metadata:
 
@@ -1816,259 +2029,6 @@ The background reaper invokes a bounded lifecycle pass for active databases. Eac
 | `cancelled` | Pending execution was intentionally disabled. |
 
 Soft delete and TTL archive cancel pending transitions. Hard delete and archive purge permanently remove their transition rows. Restoring an archived document does not reactivate cancelled transitions. `change_namespace` and `rename_namespace` update the stored transition namespace. Replacing a document preserves existing transitions unless `payload.lifecycle` replaces the same document/name.
-
-#### `import_jsonl`
-
-Creates a background job that streams newline-delimited JSON into one namespace in bounded batches. Use it instead of `insert` for large files, resumable ingestion, S3 sources, or migrations that need conflict and field-cleanup policies.
-
-The gateway records the job and returns immediately. Background workers claim it through `__kdb_jobs`, persist progress after each batch, and allow another worker to continue a resumable failed job from its recorded line/byte offset.
-
-##### Requirements
-
-- One concrete top-level `namespace` is required and may be created by the import.
-- `source_path` is required.
-- Every decompressed line must be one valid UTF-8 JSON object.
-- Local `.jsonl`, local `.jsonl.zst`, `s3://...jsonl`, and `s3://...jsonl.zst` sources are supported.
-
-##### Options
-
-| Property | Type | Default | Description |
-|---|---:|---:|---|
-| `source_path` | string | Required | Local path or `s3://bucket/key`. Compression is detected from `.zst`. |
-| `source_hash` | string | S3 metadata when present | Caller-provided source identity used for duplicate-job detection. For S3, Kongo also validates it against `x-amz-meta-source-hash`; local imports treat it as a caller-supplied identity. |
-| `on_conflict` | string | `error` | `_id` conflict policy: `error`, `skip`, `replace`, or `merge`. |
-| `ignore_input_id` | bool | `false` | Removes incoming `_id` and `id`, then generates a new `_id`. `_key` remains normal data. |
-| `drop_keys` | string[] | `[]` | Removes named top-level or dot-path fields before persistence. `_id` cannot be dropped through this option. |
-| `allow_system_timestamps` | bool | `false` | Accepts imported `_created_at` and `_modified_at`. If only `_created_at` exists, it is also used as `_modified_at`. |
-| `batch_size` | int | `500` | Documents per committed import batch, clamped to `1..10000`. |
-| `resumable` | bool | `false` | Allows a failed job to be reopened with `continue_job`. |
-
-If a source hash matches an equivalent active or completed import for the same namespace and import options, Kongo returns the existing job with `deduped:true` instead of enqueuing a duplicate.
-
-##### Import a Local File
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "import_jsonl",
-  "namespace": "users",
-  "payload": {
-    "source_path": "/data/imports/users.jsonl",
-    "on_conflict": "merge",
-    "batch_size": 1000,
-    "resumable": true
-  }
-}
-```
-
-##### Import a Compressed S3 Migration
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "import_jsonl",
-  "namespace": "users",
-  "payload": {
-    "source_path": "s3://migration-bucket/exports/users.jsonl.zst",
-    "source_hash": "upload-2026-08-07-users-v3",
-    "on_conflict": "replace",
-    "ignore_input_id": false,
-    "drop_keys": ["legacy.password", "temporary_flag"],
-    "allow_system_timestamps": true,
-    "batch_size": 2000,
-    "resumable": true
-  }
-}
-```
-
-##### Response and Job Follow-Up
-
-```json
-{
-  "status": "success",
-  "data": {
-    "job_id": "17ed650141934293b15200810a0d83f3",
-    "status": "queued",
-    "collection": "users",
-    "source_path": "/data/imports/users.jsonl",
-    "on_conflict": "merge",
-    "ignore_input_id": false,
-    "allow_system_timestamps": false,
-    "batch_size": 1000,
-    "resumable": true
-  }
-}
-```
-
-Use `get_job` to inspect progress, `continue_job` to reopen a resumable failed import, and `abort_job` to make it terminal.
-
-#### `export_jsonl`
-
-Creates a background job that queries documents and writes newline-delimited JSON in bounded parts before finalizing one output object. Use it for data portability, migrations, analytics handoff, offline processing, and large downloads that should not block the gateway request.
-
-##### Scope and Output
-
-- Select one namespace with `namespace`, or all namespaces with `namespace:"*"`/`scope:"all"`.
-- If `target_path` is omitted, Kongo generates a path under the configured export destination.
-- A local target writes to local storage.
-- An `s3://bucket/prefix/object` target uses configured S3 credentials.
-- `compress:true` produces `.jsonl.zst`; `compress:false` produces `.jsonl`.
-
-##### Options
-
-| Property | Type | Default | Description |
-|---|---:|---:|---|
-| `target_path` | string | Generated | Local path or S3 URI. Kongo adds the canonical extension when needed. |
-| `compress` | bool | `true` | Writes Zstandard-compressed JSONL when true. |
-| `include_system_timestamps` | bool | `true` | Includes `_created_at` and `_modified_at` in each exported object. |
-| `filter` | object | `{}` | Filter expression applied to the export source. |
-| `sort` | string or object | `_created_at DESC` | Stable export order; dot paths are supported. |
-| `limit` | int | Unlimited | Maximum documents to export. |
-| `offset` | int | `0` | Starting offset. |
-| `fields` | string[] | All | Include projection. `_id` is retained. |
-| `exclude_fields` | string[] | `[]` | Exclude projection. `_id` is retained. |
-| `include_archive` | bool | `false` | Exports live and archived documents. |
-| `archive_only` | bool | `false` | Exports only archived documents. Cannot be combined with `include_archive:true`. |
-
-`page` and `per_page` are accepted by the common payload shape, but export execution uses `limit` and `offset`; use those fields for deterministic exports.
-
-##### Export One Namespace to the Configured Destination
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "export_jsonl",
-  "namespace": "users",
-  "payload": {
-    "filter": {"status": "active"},
-    "sort": "_created_at asc",
-    "fields": ["_id", "email", "name"],
-    "compress": true,
-    "include_system_timestamps": true
-  }
-}
-```
-
-##### Export Archive Data to S3
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "export_jsonl",
-  "namespace": "users",
-  "payload": {
-    "target_path": "s3://exports-bucket/kongo/users-archive",
-    "archive_only": true,
-    "sort": "_created_at asc",
-    "limit": 1000000,
-    "offset": 0,
-    "exclude_fields": ["password", "ssn"],
-    "compress": true
-  }
-}
-```
-
-##### Response
-
-```json
-{
-  "status": "success",
-  "data": {
-    "job_id": "dd21d1525b4544c4b70916572dcb30ea",
-    "status": "queued",
-    "target_path": "/data/exports/20260807T120000Z__myapp_main.jsonl.zst",
-    "compress": true,
-    "include_system_timestamps": true
-  }
-}
-```
-
-Use the unified job operations to monitor, continue, or abort export work.
-
-#### `transaction`
-
-Applies a sequence of document mutations as one atomic database transaction. Use it when several related inserts, updates, or deletes must either all commit or all roll back. Nested operations may target different namespaces, but they always use the single database selected by the outer `db` field.
-
-Unlike the other document operations, transaction entries are provided in top-level `data`, not `payload.data`.
-
-##### Requirements
-
-- Top-level `db` selects the database for every nested operation.
-- Top-level `data` must be a non-empty array of operation envelopes.
-- Supported nested operations are `insert`, `update`, and `delete`.
-- Each nested operation supplies its own `namespace` and `payload` as required by that operation.
-- A nested operation cannot override the outer database.
-- If any nested operation fails, the entire transaction is rolled back.
-- Nested `insert` supports `unique_fields` and `on_conflict:"skip"|"error"`. The check runs inside the active transaction, so it sees both existing documents and earlier nested inserts.
-- A skipped unique insert does not create its document or lifecycle transitions. The transaction response reports the number under `skipped_count`.
-
-##### Example
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "transaction",
-  "data": [
-    {
-      "operation": "insert",
-      "namespace": "users",
-      "payload": {
-        "data": {"_id": "u1", "name": "Ada"}
-      }
-    },
-    {
-      "operation": "update",
-      "namespace": "accounts",
-      "payload": {
-        "data": {"_id": "account-1", "owner_id": "u1"}
-      }
-    }
-  ]
-}
-```
-
-Use `transaction` for short, related mutation sets. Large ingestion remains better suited to `insert` with array data or the resumable `import_jsonl` job.
-
-##### Insert With Composite Uniqueness
-
-`on_conflict:"skip"` keeps the transaction running when the composite value already exists. Use `"error"` when a conflict must roll back every nested operation.
-
-```json
-{
-  "db": "myapp/main",
-  "operation": "transaction",
-  "data": [
-    {
-      "operation": "insert",
-      "namespace": "users",
-      "payload": {
-        "data": {
-          "tenant": {"id": "tenant_01"},
-          "profile": {"email": "ada@example.com"},
-          "name": "Ada"
-        },
-        "unique_fields": ["tenant.id", "profile.email"],
-        "on_conflict": "error"
-      }
-    }
-  ]
-}
-```
-
-Successful transaction responses keep `count` as the number of processed nested operation envelopes and include `skipped_count` for unique inserts skipped by policy:
-
-```json
-{
-  "status": "success",
-  "data": {
-    "count": 2,
-    "skipped_count": 1,
-    "message": "transaction_committed"
-  },
-  "committed": true,
-  "is_async_ack": false
-}
-```
 
 #### Document Operators and Query Shaping
 
@@ -2254,11 +2214,11 @@ Projection shapes returned documents without modifying stored data. It runs afte
 
 | Property | Behavior |
 |---|---|
-| `fields` | Starts with only the listed paths, then preserves `_id` and `_user_id` when present. The array must not be empty. |
+| `fields` | Starts with only the listed paths, then preserves `_id`, `_user_id`, and an included `_namespace` when present. The array must not be empty. |
 | `exclude_fields` | Removes listed paths from the included or full document. The array must not be empty. |
 | Both | `fields` is applied first, then `exclude_fields`. |
 | Dot paths | Preserve the nested object structure rather than flattening keys. |
-| Protected fields | `_id` and `_user_id` cannot be excluded. |
+| Protected fields | `_id`, `_user_id`, and an included `_namespace` cannot be excluded. |
 
 ###### `fields`: Inclusion Projection
 
@@ -3498,6 +3458,176 @@ Mutation strictness is controlled by `KONGODB_STRICT_MUTATIONS_OPERATORS`:
 
 ---
 
+
+#### `import_jsonl`
+
+Creates a background job that streams newline-delimited JSON into one namespace in bounded batches. Use it instead of `insert` for large files, resumable ingestion, S3 sources, or migrations that need conflict and field-cleanup policies.
+
+The gateway records the job and returns immediately. Background workers claim it through `__kdb_jobs`, persist progress after each batch, and allow another worker to continue a resumable failed job from its recorded line/byte offset.
+
+##### Requirements
+
+- One concrete top-level `namespace` is required and may be created by the import.
+- `source_path` is required.
+- Every decompressed line must be one valid UTF-8 JSON object.
+- Local `.jsonl`, local `.jsonl.zst`, `s3://...jsonl`, and `s3://...jsonl.zst` sources are supported.
+
+##### Options
+
+| Property | Type | Default | Description |
+|---|---:|---:|---|
+| `source_path` | string | Required | Local path or `s3://bucket/key`. Compression is detected from `.zst`. |
+| `source_hash` | string | S3 metadata when present | Caller-provided source identity used for duplicate-job detection. For S3, Kongo also validates it against `x-amz-meta-source-hash`; local imports treat it as a caller-supplied identity. |
+| `on_conflict` | string | `error` | `_id` conflict policy: `error`, `skip`, `replace`, or `merge`. |
+| `ignore_input_id` | bool | `false` | Removes incoming `_id` and `id`, then generates a new `_id`. `_key` remains normal data. |
+| `drop_keys` | string[] | `[]` | Removes named top-level or dot-path fields before persistence. `_id` cannot be dropped through this option. |
+| `allow_system_timestamps` | bool | `false` | Accepts imported `_created_at` and `_modified_at`. If only `_created_at` exists, it is also used as `_modified_at`. |
+| `batch_size` | int | `500` | Documents per committed import batch, clamped to `1..10000`. |
+| `resumable` | bool | `false` | Allows a failed job to be reopened with `continue_job`. |
+
+If a source hash matches an equivalent active or completed import for the same namespace and import options, Kongo returns the existing job with `deduped:true` instead of enqueuing a duplicate.
+
+##### Import a Local File
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "import_jsonl",
+  "namespace": "users",
+  "payload": {
+    "source_path": "/data/imports/users.jsonl",
+    "on_conflict": "merge",
+    "batch_size": 1000,
+    "resumable": true
+  }
+}
+```
+
+##### Import a Compressed S3 Migration
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "import_jsonl",
+  "namespace": "users",
+  "payload": {
+    "source_path": "s3://migration-bucket/exports/users.jsonl.zst",
+    "source_hash": "upload-2026-08-07-users-v3",
+    "on_conflict": "replace",
+    "ignore_input_id": false,
+    "drop_keys": ["legacy.password", "temporary_flag"],
+    "allow_system_timestamps": true,
+    "batch_size": 2000,
+    "resumable": true
+  }
+}
+```
+
+##### Response and Job Follow-Up
+
+```json
+{
+  "status": "success",
+  "data": {
+    "job_id": "17ed650141934293b15200810a0d83f3",
+    "status": "queued",
+    "namespace": "users",
+    "source_path": "/data/imports/users.jsonl",
+    "on_conflict": "merge",
+    "ignore_input_id": false,
+    "allow_system_timestamps": false,
+    "batch_size": 1000,
+    "resumable": true
+  }
+}
+```
+
+Use `get_job` to inspect progress, `continue_job` to reopen a resumable failed import, and `abort_job` to make it terminal.
+
+#### `export_jsonl`
+
+Creates a background job that queries documents and writes newline-delimited JSON in bounded parts before finalizing one output object. Use it for data portability, migrations, analytics handoff, offline processing, and large downloads that should not block the gateway request.
+
+##### Scope and Output
+
+- Select one namespace with a string, several with `namespace:["users","admins"]`, or all with `namespace:"*"`/`scope:"all"`.
+- If `target_path` is omitted, Kongo generates a path under the configured export destination.
+- A local target writes to local storage.
+- An `s3://bucket/prefix/object` target uses configured S3 credentials.
+- `compress:true` produces `.jsonl.zst`; `compress:false` produces `.jsonl`.
+
+##### Options
+
+| Property | Type | Default | Description |
+|---|---:|---:|---|
+| `target_path` | string | Generated | Local path or S3 URI. Kongo adds the canonical extension when needed. |
+| `compress` | bool | `true` | Writes Zstandard-compressed JSONL when true. |
+| `include_system_timestamps` | bool | `true` | Includes `_created_at` and `_modified_at` in each exported object. |
+| `filter` | object | `{}` | Filter expression applied to the export source. |
+| `sort` | string or object | `_created_at DESC` | Stable export order; dot paths are supported. |
+| `limit` | int | Unlimited | Maximum documents to export. |
+| `offset` | int | `0` | Starting offset. |
+| `fields` | string[] | All | Include projection. `_id` is retained. |
+| `exclude_fields` | string[] | `[]` | Exclude projection. `_id` is retained. |
+| `include_archive` | bool | `false` | Exports live and archived documents. |
+| `archive_only` | bool | `false` | Exports only archived documents. Cannot be combined with `include_archive:true`. |
+
+`page` and `per_page` are accepted by the common payload shape, but export execution uses `limit` and `offset`; use those fields for deterministic exports.
+
+##### Export One Namespace to the Configured Destination
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "export_jsonl",
+  "namespace": "users",
+  "payload": {
+    "filter": {"status": "active"},
+    "sort": "_created_at asc",
+    "fields": ["_id", "email", "name"],
+    "compress": true,
+    "include_system_timestamps": true
+  }
+}
+```
+
+##### Export Archive Data to S3
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "export_jsonl",
+  "namespace": "users",
+  "payload": {
+    "target_path": "s3://exports-bucket/kongo/users-archive",
+    "archive_only": true,
+    "sort": "_created_at asc",
+    "limit": 1000000,
+    "offset": 0,
+    "exclude_fields": ["password", "ssn"],
+    "compress": true
+  }
+}
+```
+
+##### Response
+
+```json
+{
+  "status": "success",
+  "data": {
+    "job_id": "dd21d1525b4544c4b70916572dcb30ea",
+    "status": "queued",
+    "target_path": "/data/exports/20260807T120000Z__myapp_main.jsonl.zst",
+    "compress": true,
+    "include_system_timestamps": true
+  }
+}
+```
+
+Use the unified job operations to monitor, continue, or abort export work.
+
+
 ### 2) Metrics Events
 #### `metrics_ingest`
 Append one or many metric events for lightweight SaaS metrics.
@@ -4305,7 +4435,7 @@ Hard delete from archive only.
   - `dry_run`
 
 #### `change_namespace`
-Move docs between namespaces by updating collection value.
+Move documents by changing their namespace assignment.
 - Required payload:
   - `from_namespace`
   - `to_namespace`
@@ -5035,8 +5165,8 @@ These examples cover async jobs, direct SQL, and transactional request batches.
 { "db":"myapp/main", "operation":"list_jobs", "payload":{"job_type":"import_jsonl","status":"failed"} }
 { "db":"myapp/main", "operation":"continue_job", "payload":{"job_id":"job_123"} }
 { "db":"myapp/main", "operation":"abort_job", "payload":{"job_id":"job_123"} }
-{ "db":"myapp/main", "operation":"sql_execute", "payload":{"sql":"SELECT collection, COUNT(*) AS total FROM __kdb_documents WHERE collection = ? GROUP BY collection","params":["users"]} }
-{ "db":"myapp/main", "operation":"transaction", "data":[{"operation":"insert","namespace":"users","payload":{"data":{"_id":"u1","name":"Ada"}}},{"operation":"update","namespace":"users","payload":{"data":{"_id":"u1","plan":"pro"}}}] }
+{ "db":"myapp/main", "operation":"sql_execute", "payload":{"sql":"SELECT id, email FROM users ORDER BY id LIMIT 25","params":[]} }
+{ "db":"myapp/main", "operation":"transaction", "payload":{"operations":[{"operation":"insert","namespace":"users","payload":{"data":{"_id":"u1","name":"Ada"}}},{"operation":"update","namespace":"users","payload":{"data":{"_id":"u1","plan":"pro"}}}] } }
 ```
 
 ### Shorthand Alias Examples
@@ -5056,4 +5186,4 @@ These are final reminders about current behavior, reserved semantics, and implem
 - `group_by` exists in the payload but is not implemented yet.
 - `query` with `payload.search` only targets live documents.
 - `_key` has no special meaning and is stored, filtered, and returned like ordinary document data.
-- `namespace` is the canonical name; `collection` is an alias.
+- `namespace` is the only public document grouping selector.

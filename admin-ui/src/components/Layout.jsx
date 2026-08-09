@@ -31,9 +31,9 @@ export function PageHeader({ eyebrow, title, description, actions }) {
   return (
     <header className="mb-4 flex flex-col gap-3 border-b border-neutral/20 pb-4 lg:flex-row lg:items-end lg:justify-between">
       <div>
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">{eyebrow}</p>
-        <h2 className="mt-1 text-2xl font-semibold tracking-tight text-ink">{title}</h2>
-        {description ? <p className="mt-1 max-w-3xl text-sm text-neutral">{description}</p> : null}
+        <p className="text-base font-light uppercase tracking-[0.18em] text-neutral">{eyebrow}</p>
+        <h2 className="hidden mt-1 text-2xl font-semibold tracking-tight text-ink">{title}</h2>
+        {description ? <p className="mt-1 font-light text-sm text-ink tracking-wider">{description}</p> : null}
       </div>
       {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
     </header>

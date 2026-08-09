@@ -8,18 +8,17 @@ pub struct GatewayRequest {
     #[serde(rename = "db", alias = "db_path")]
     pub db: Option<String>,
     pub operation: String,
-    #[serde(default, alias = "collection")]
-    pub namespace: Option<String>,
     #[serde(default)]
-    pub namespaces: Option<Vec<String>>,
+    pub namespace: Option<NamespaceSelector>,
     #[serde(default)]
     pub payload: OperationPayload,
-    pub data: Option<Vec<GatewayRequest>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OperationPayload {
+    #[serde(skip_deserializing)]
     pub collection: Option<String>,
+    #[serde(skip_deserializing)]
     pub namespaces: Option<Vec<String>>,
     pub table: Option<String>,
     pub sql: Option<String>,
@@ -108,7 +107,7 @@ pub struct OperationPayload {
     pub bucket_label: Option<String>,
     pub metrics: Option<Value>,
     pub batch: Option<Vec<OperationPayload>>,
-    pub queries: Option<Vec<MultiQueryItem>>,
+    pub operations: Option<Vec<BatchOperation>>,
     pub on_error: Option<String>,
     pub replace: Option<bool>,
     pub unique_fields: Option<Vec<String>>,
@@ -167,12 +166,19 @@ pub struct OperationPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultiQueryItem {
-    pub alias: String,
-    pub namespace: Option<String>,
-    pub namespaces: Option<Vec<String>>,
+pub struct BatchOperation {
+    pub operation: Option<String>,
+    pub alias: Option<String>,
+    pub namespace: Option<NamespaceSelector>,
     #[serde(default)]
     pub payload: OperationPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NamespaceSelector {
+    One(String),
+    Many(Vec<String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

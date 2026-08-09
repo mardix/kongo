@@ -720,7 +720,7 @@ async fn get_stats(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<
     let __kdb_archived = stats_for_table(conn, "__kdb_archive", &collection).await?;
 
     Ok(GatewayResponse::ok(Some(json!({
-        "collection": collection,
+        "namespace": collection,
         "live_count": live.0,
         "live_bytes": live.1,
         "__kdb_archive_count": __kdb_archived.0,
@@ -1100,17 +1100,17 @@ async fn list_collections(conn: &libsql::Connection) -> AppResult<GatewayRespons
     let mut rows = conn
         .query(sql, ())
         .await
-        .map_err(|e| AppError::Internal(format!("list_collections failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("list_namespaces failed: {e}")))?;
 
     let mut items = Vec::<Value>::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("list_collections row read failed: {e}")))?
+        .map_err(|e| AppError::Internal(format!("list_namespaces row read failed: {e}")))?
     {
         let collection: String = row
             .get(0)
-            .map_err(|e| AppError::Internal(format!("collection decode failed: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("namespace decode failed: {e}")))?;
         let live_count: i64 = row
             .get(1)
             .map_err(|e| AppError::Internal(format!("live_count decode failed: {e}")))?;
@@ -1124,7 +1124,7 @@ async fn list_collections(conn: &libsql::Connection) -> AppResult<GatewayRespons
             .get(4)
             .map_err(|e| AppError::Internal(format!("__kdb_archive_bytes decode failed: {e}")))?;
         items.push(json!({
-            "collection": collection,
+            "namespace": collection,
             "live_count": live_count,
             "live_bytes": live_bytes,
             "__kdb_archive_count": __kdb_archive_count,

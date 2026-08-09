@@ -667,7 +667,7 @@ fn parse_namespaces(raw: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> 
         .collect::<Vec<_>>();
     if out.is_empty() {
         return Err(AppError::BadRequest(
-            "namespaces cannot be empty".to_string(),
+            "namespace array cannot be empty".to_string(),
         ));
     }
     out.sort();
@@ -675,7 +675,7 @@ fn parse_namespaces(raw: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> 
     let has_star = out.iter().any(|v| v == "*");
     if has_star && out.len() > 1 {
         return Err(AppError::BadRequest(
-            "namespaces cannot include '*' with other values".to_string(),
+            "namespace array cannot include '*' with other values".to_string(),
         ));
     }
     Ok(Some(out))
@@ -689,7 +689,7 @@ fn resolve_read_namespace_scope(
     let single = payload.collection.clone().filter(|c| !c.trim().is_empty());
     if list.is_some() && single.is_some() {
         return Err(AppError::BadRequest(
-            "namespace and namespaces cannot both be provided".to_string(),
+            "single and array namespace selectors cannot both be provided".to_string(),
         ));
     }
     if let Some(list) = list {

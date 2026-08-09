@@ -113,14 +113,27 @@ gateway '{"db":"lifecycle/main","operation":"delete","namespace":"wrong-namespac
 STRICT_TRANSITION="$(gateway '{"db":"lifecycle/main","operation":"get_transition","payload":{"document_id":"doc-lifecycle-2","name":"upsert-attached"}}')"
 assert_contains "$STRICT_TRANSITION" '"status":"pending"' "wrong-namespace purge must preserve transition and document"
 TX_ATTACHED="$(gateway '{
-  "db":"lifecycle/main","operation":"transaction","data":[
-    {"operation":"insert","payload":{"collection":"accounts","data":{"_id":"doc-lifecycle-tx","status":"new"},
+  "db":"lifecycle/main","operation":"transaction","payload":{"operations":[
+    {"operation":"insert","namespace":"accounts","payload":{"data":{"_id":"doc-lifecycle-tx","status":"new"},
       "lifecycle":{"name":"tx-attached","after_seconds":3600,"when":{},"update":{"status":"aged"}}}}
-  ],"payload":{"commit":true}
+  ],"commit":true}
 }')"
 assert_contains "$TX_ATTACHED" '"transaction_committed"' "transaction insert with lifecycle should commit"
 TX_TRANSITION="$(gateway '{"db":"lifecycle/main","operation":"get_transition","payload":{"document_id":"doc-lifecycle-tx","name":"tx-attached"}}')"
 assert_contains "$TX_TRANSITION" '"status":"pending"' "transaction should persist lifecycle atomically"
+TX_UPSERT_ATTACHED="$(gateway '{
+  "db":"lifecycle/main","operation":"transaction","payload":{"commit":true,"operations":[
+    {"operation":"upsert","namespace":"accounts","payload":{"filter":{"_id":"doc-lifecycle-tx-upsert"},
+      "insert_data":{"status":"new"},"update_data":{"status":"existing"}}},
+    {"operation":"upsert","namespace":"accounts","payload":{"filter":{"_id":"doc-lifecycle-tx-upsert"},
+      "insert_data":{"status":"new"},"update_data":{"status":"existing"},"max_docs":1,
+      "lifecycle":{"name":"tx-upsert-attached","after_seconds":3600,"when":{},"update":{"status":"aged"}}}}
+  ]}
+}')"
+assert_contains "$TX_UPSERT_ATTACHED" '"action":"inserted"' "transaction upsert should insert inside the active transaction"
+assert_contains "$TX_UPSERT_ATTACHED" '"action":"updated"' "transaction upsert should update an earlier child result"
+TX_UPSERT_TRANSITION="$(gateway '{"db":"lifecycle/main","operation":"get_transition","payload":{"document_id":"doc-lifecycle-tx-upsert","name":"tx-upsert-attached"}}')"
+assert_contains "$TX_UPSERT_TRANSITION" '"status":"pending"' "transaction upsert should persist lifecycle atomically"
 gateway '{
   "db":"lifecycle/main","operation":"schedule_transition",
   "payload":{"document_id":"doc-lifecycle-1","name":"cancel-me","after_seconds":3600,

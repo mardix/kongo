@@ -215,7 +215,7 @@ function buildSearchRequest(db, form, parsedFilter) {
 }
 
 function namespaceLabel(item) {
-  return typeof item === 'string' ? item : item?.namespace || item?.collection || item?.name || '';
+  return typeof item === 'string' ? item : item?.namespace || item?.name || '';
 }
 
 function csv(value) {

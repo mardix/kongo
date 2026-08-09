@@ -12,7 +12,7 @@ import { FullTextSearchPanel } from './FullTextSearchPanel.jsx';
 import { AuditLogsPanel } from './AuditLogsPanel.jsx';
 import { DocumentUiEditor } from './DocumentUiEditor.jsx';
 
-const operations = ['query', 'insert', 'update', 'delete', 'count', 'aggregate', 'custom'];
+const operations = ['query', 'multi_query', 'insert', 'update', 'upsert', 'delete', 'count', 'aggregate', 'transaction', 'custom'];
 const dbTabs = [
   { id: 'overview', label: 'Overview' },
   { id: 'crud', label: 'DocumentDB' },
@@ -84,7 +84,7 @@ const filterOperators = [
 ];
 
 export function DbCrudConsole() {
-  const { settings, updateSetting, gateway, runStatusCall, showToast, activeNamespaces, setActiveNamespaces, namespaceIntent, connectionStorageKey } = useAdmin();
+  const { settings, origin, updateSetting, gateway, runStatusCall, showToast, activeNamespaces, setActiveNamespaces, namespaceIntent, connectionStorageKey } = useAdmin();
   const [route, setRoute] = useState(() => parseCrudHash(window.location.hash));
   const [newDb, setNewDb] = useState(settings.db || 'projects/db01.main');
   const [dbSearch, setDbSearch] = useState('');
@@ -253,7 +253,7 @@ export function DbCrudConsole() {
           attachUserFields: Array.isArray(request.payload?.attach_user_fields) ? request.payload.attach_user_fields.join(', ') : 'id, first_name, last_name, profile_photo'
         });
       }
-      if (request.namespace) updateSetting('namespace', request.namespace);
+      if (isConcreteNamespace(request.namespace)) updateSetting('namespace', request.namespace);
       return data;
     });
   }
@@ -740,7 +740,7 @@ export function DbCrudConsole() {
       if (entryModal.mode === 'create') {
         const addNamespace = (items) => items.some((item) => namespaceLabel(item) === namespace)
           ? items
-          : [...items, { namespace, collection: namespace, name: namespace }];
+          : [...items, { namespace, name: namespace }];
         setNamespaces(addNamespace);
         setActiveNamespaces(addNamespace);
       }
@@ -783,7 +783,7 @@ export function DbCrudConsole() {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       at: new Date().toISOString(),
       operation: request.operation,
-      namespace: request.namespace || '',
+      namespace: namespaceSummary(request.namespace),
       db: request.db || activeDb || '',
       request
     };
@@ -799,7 +799,7 @@ export function DbCrudConsole() {
     request.db = activeDb;
     setRequestText(pretty(request));
     setOperation(operations.includes(request.operation) ? request.operation : 'custom');
-    if (request.namespace) updateSetting('namespace', request.namespace);
+    if (isConcreteNamespace(request.namespace)) updateSetting('namespace', request.namespace);
     setRequestOpen(true);
     setHistoryOpen(false);
   }
@@ -854,6 +854,8 @@ export function DbCrudConsole() {
 
   return (
     <section className="space-y-4">
+      <DatabaseContextBar connectionName={settings.name} origin={origin} db={activeDb} />
+
       {route.tab === 'overview' ? (
         <DbOverviewPanel
           db={activeDb}
@@ -1110,6 +1112,41 @@ export function DbCrudConsole() {
   );
 }
 
+function DatabaseContextBar({ connectionName, origin, db }) {
+  return (
+    <div className="-mt-4 flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 rounded-b-lg border-x border-b border-slate-200 bg-white/80 px-3 py-1.5 text-xs text-slate-500 lg:-mt-6">
+      <button
+        type="button"
+        onClick={() => { window.location.hash = `#crud/db/${encodeDbForHash(db)}/overview`; }}
+        className="inline-flex items-center gap-1.5 font-semibold text-slate-600 transition hover:text-primary"
+        aria-label="Open database overview"
+      >
+        <span className="hidden" aria-hidden="true">←</span>
+        <span>Home</span>
+      </button>
+      <span className="h-4 w-px bg-slate-200" aria-hidden="true" />
+      <span className="inline-flex min-w-0 items-center gap-1.5">
+        <span className="text-slate-400">Connection</span>
+        <strong className="max-w-36 truncate font-semibold text-slate-700" title={connectionName || 'Connection'}>{connectionName || 'Connection'}</strong>
+        <span className="max-w-52 truncate font-mono text-[10px] text-slate-600" title={origin}>/ {connectionHost(origin)}</span>
+      </span>
+      <span className="hidden h-4 w-px bg-slate-200 sm:block" aria-hidden="true" />
+      <span className="inline-flex min-w-0 items-center gap-1.5">
+        <span className="text-slate-400">Database</span>
+        <code className="max-w-[min(52vw,32rem)] truncate font-mono text-[11px] font-semibold text-slate-700" title={db}>{db}</code>
+      </span>
+    </div>
+  );
+}
+
+function connectionHost(origin) {
+  try {
+    return new URL(origin).host;
+  } catch (_) {
+    return origin;
+  }
+}
+
 function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, inventoryMeta, refreshing, openCreateModal, createModalOpen, createDb, closeCreateModal, refreshDbs, selectDb }) {
   const [folderPath, setFolderPath] = useState('');
   const [filter, setFilter] = useState('all');
@@ -1148,91 +1185,88 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
   }
 
   return (
-    <section className="space-y-4">
-      <PageHeader
-        eyebrow="Connected Host"
-        title={connectionName || 'Databases'}
-        description="Select a database to open its workspace. This inventory does not open every database it discovers."
-        actions={<><button onClick={openCreateModal} className="btn-primary">Create New DB</button><button onClick={refreshDbs} className="btn-secondary">Refresh Databases</button></>}
-      />
-
-      <section className="panel">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+    <section>
+      <section className="overflow-hidden rounded-xl border border-slate-300 bg-white">
+        <div className="flex flex-col gap-5 border-b border-slate-300 px-5 py-5 lg:flex-row lg:items-start lg:justify-between lg:px-6">
           <div>
-            <h3 className="text-sm font-semibold text-slate-950">Database Inventory</h3>
-            <p className="text-xs text-slate-500">Cached per host in this browser. Search, folders, filters, and pagination are handled locally.</p>
+            <h2 className="text-xl font-bold tracking-tight text-slate-950">Database Inventory</h2>
+            <p className="mt-1 text-sm text-slate-600">Cached per host in this browser. Search, folders, filters, and pagination are handled locally.</p>
           </div>
-          <div className="flex flex-wrap gap-2 text-xs">
-            <span className="rounded-full bg-emerald-50 px-3 py-1 font-semibold text-emerald-700">Loaded {loadedCount}</span>
-            <span className="rounded-full bg-sky-50 px-3 py-1 font-semibold text-sky-700">Local {localCount}</span>
-            <span className="rounded-full bg-indigo-50 px-3 py-1 font-semibold text-indigo-700">S3 {s3Count}</span>
-            <span className="rounded-full bg-slate-100 px-3 py-1 font-semibold text-slate-600">Total {dbs.length}</span>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-3 lg:justify-end">
+            <div className="flex items-center divide-x divide-slate-300 text-sm text-slate-600">
+              <span className="pr-4">Loaded <strong className="font-mono text-slate-950">{loadedCount}</strong></span>
+              <span className="px-4">Local <strong className="font-mono text-slate-950">{localCount}</strong></span>
+              <span className="px-4">S3 <strong className="font-mono text-slate-950">{s3Count}</strong></span>
+              <span className="pl-4">Total <strong className="font-mono text-slate-950">{dbs.length}</strong></span>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={openCreateModal} className="btn-primary">Create New DB</button>
+              <button onClick={refreshDbs} className="btn-secondary">{refreshing ? 'Refreshing...' : 'Refresh'}</button>
+            </div>
           </div>
         </div>
-        <div className="space-y-4 p-4">
+
+        <div className="border-b border-slate-300 px-5 py-5 lg:px-6">
           <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-end">
             <Field label="Search all DB paths" value={dbSearch} onChange={updateSearch} placeholder="tenant, projects/db0.main, prod" />
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2" aria-label="Database filters">
               {['all', 'loaded', 'not_loaded', 'local', 's3'].map((item) => (
-                <button key={item} type="button" onClick={() => updateFilter(item)} className={`btn-chip ${filter === item ? 'btn-chip-active' : ''}`}>{dbFilterLabel(item)}</button>
+                <button key={item} type="button" onClick={() => updateFilter(item)} className={`btn-secondary min-h-11 ${filter === item ? '!border-slate-950 !bg-slate-950 !text-white' : ''}`}>{dbFilterLabel(item)}</button>
               ))}
             </div>
           </div>
+        </div>
 
-          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-3 py-2">
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => openFolder(parentDbFolder(folderPath))}
-                  disabled={!folderPath || Boolean(term)}
-                  className="btn-label shrink-0"
-                  title="Open parent folder"
-                >
-                  Up
-                </button>
-                <DbBreadcrumb path={folderPath} onOpen={openFolder} disabled={Boolean(term)} />
-              </div>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                <span>{refreshing ? 'Refreshing...' : inventoryMeta?.cached_at ? `Cached ${formatRelativeTime(inventoryMeta.cached_at)}` : 'No cache yet'}</span>
-                {inventoryMeta?.host_key ? <span className="hidden rounded-full bg-white px-2 py-1 font-mono text-[10px] text-slate-400 md:inline">{inventoryMeta.host_key}</span> : null}
-              </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-300 bg-slate-50 px-5 py-3 lg:px-6">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <button
+                type="button"
+                onClick={() => openFolder(parentDbFolder(folderPath))}
+                disabled={!folderPath || Boolean(term)}
+                className="btn-secondary shrink-0"
+                title="Open parent folder"
+              >
+                Up
+              </button>
+              <DbBreadcrumb path={folderPath} onOpen={openFolder} disabled={Boolean(term)} />
             </div>
-
-            {!term && folderView.folders.length ? (
-              <section className="border-b border-slate-200">
-                <div className="grid grid-cols-[minmax(0,1fr)_100px_90px] items-center gap-3 bg-slate-100/80 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 md:grid-cols-[minmax(0,1fr)_140px_140px_90px]">
-                  <span>Name</span>
-                  <span>Type</span>
-                  <span className="hidden md:block">Contents</span>
-                  <span className="text-right">Action</span>
-                </div>
-                {folderView.folders.map((folder) => (
-                  <FolderBrowserRow key={folder.path} folder={folder} onOpen={() => openFolder(folder.path)} />
-                ))}
-              </section>
-            ) : null}
-
-            {!term && !folderView.folders.length && !folderView.dbs.length ? (
-              <div className="px-4 py-5 text-sm text-slate-500">This folder is empty.</div>
-            ) : null}
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-3 text-xs text-slate-600">
+              <span>{refreshing ? 'Refreshing...' : inventoryMeta?.cached_at ? `Cached ${formatRelativeTime(inventoryMeta.cached_at)}` : 'No cache yet'}</span>
+              {inventoryMeta?.host_key ? <code className="hidden max-w-md truncate rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] text-slate-600 xl:inline" title={inventoryMeta.host_key}>{inventoryMeta.host_key}</code> : null}
+            </div>
           </div>
 
-          <section className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
+          {!term && folderView.folders.length ? (
+            <section className="border-b border-slate-300">
+              <div className="grid grid-cols-[minmax(0,1fr)_100px_90px] items-center gap-4 border-b border-slate-300 bg-slate-50 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-600 md:grid-cols-[minmax(0,1fr)_140px_160px_90px] lg:px-6">
+                <span>Name</span>
+                <span>Type</span>
+                <span className="hidden md:block">Contents</span>
+                <span className="text-right">Action</span>
+              </div>
+              {folderView.folders.map((folder) => (
+                <FolderBrowserRow key={folder.path} folder={folder} onOpen={() => openFolder(folder.path)} />
+              ))}
+            </section>
+          ) : null}
+
+          {!term && !folderView.folders.length && !folderView.dbs.length ? (
+            <div className="border-b border-slate-300 px-5 py-6 text-sm text-slate-600 lg:px-6">This folder is empty.</div>
+          ) : null}
+
+          <section>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-300 px-5 py-4 lg:px-6">
               <div>
-                <h4 className="text-sm font-semibold text-slate-950">{term ? 'Search Results' : `Databases${folderPath ? ` in /${folderPath}` : ''}`}</h4>
-                <p className="text-xs text-slate-500">Showing {pageItems.length ? ((safePage - 1) * pageSize) + 1 : 0}-{Math.min(safePage * pageSize, visibleDbs.length)} of {visibleDbs.length}</p>
+                <h3 className="text-base font-bold text-slate-950">{term ? 'Search Results' : `Databases${folderPath ? ` in /${folderPath}` : ''}`}</h3>
+                <p className="text-sm text-slate-600">Showing {pageItems.length ? ((safePage - 1) * pageSize) + 1 : 0}-{Math.min(safePage * pageSize, visibleDbs.length)} of {visibleDbs.length}</p>
               </div>
-              <div className="flex items-center gap-2">
-                <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold outline-none">
-                  {[25, 50, 100, 250].map((size) => <option key={size} value={size}>{size} / page</option>)}
-                </select>
-              </div>
+              <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }} className="rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-slate-500">
+                {[25, 50, 100, 250].map((size) => <option key={size} value={size}>{size} / page</option>)}
+              </select>
             </div>
             {pageItems.length ? (
-              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                <div className="hidden grid-cols-[minmax(0,1fr)_100px_170px_110px_70px] items-center gap-3 border-b border-slate-200 bg-slate-100/80 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 md:grid">
+              <div>
+                <div className="hidden grid-cols-[minmax(0,1fr)_100px_170px_120px_70px] items-center gap-4 border-b border-slate-300 bg-slate-50 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-600 md:grid lg:px-6">
                   <span>Database</span>
                   <span>Size</span>
                   <span>Storage</span>
@@ -1243,16 +1277,19 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
                   <DbBrowserRow key={`${dbLabel(db)}-${idx}`} db={db} onOpen={() => selectDb(dbLabel(db))} />
                 ))}
               </div>
-            ) : <EmptyCards message={!term && folderView.folders.length ? 'Open a folder above to browse its databases.' : dbs.length ? 'No databases match this search or filter.' : 'No DBs found yet. Create one or refresh the inventory.'} />}
-            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
-              <span>Page <span className="font-mono font-semibold text-slate-950">{safePage}</span> of <span className="font-mono font-semibold text-slate-950">{totalPages}</span></span>
+            ) : (
+              <div className="px-5 py-8 lg:px-6">
+                <EmptyCards message={!term && folderView.folders.length ? 'Open a folder above to browse its databases.' : dbs.length ? 'No databases match this search or filter.' : 'No DBs found yet. Create one or refresh the inventory.'} />
+              </div>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-300 bg-slate-50 px-5 py-4 text-sm text-slate-700 lg:px-6">
+              <span>Page <strong className="font-mono text-slate-950">{safePage}</strong> of <strong className="font-mono text-slate-950">{totalPages}</strong></span>
               <div className="flex gap-2">
                 <button type="button" onClick={() => setPage(Math.max(1, safePage - 1))} disabled={safePage <= 1} className="btn-secondary">Prev</button>
                 <button type="button" onClick={() => setPage(Math.min(totalPages, safePage + 1))} disabled={safePage >= totalPages} className="btn-secondary">Next</button>
               </div>
             </div>
           </section>
-        </div>
       </section>
 
       {createModalOpen ? (
@@ -1269,8 +1306,8 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
 
 function CreateDbModal({ value, onChange, onClose, onSubmit }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="w-full max-w-xl rounded-2xl border border-slate-300 bg-white">
         <div className="border-b border-slate-200 px-5 py-4">
           <h3 className="text-lg font-semibold text-slate-950">Create new Db</h3>
           <p className="mt-1 text-sm text-slate-600">Enter the database path, then create and open it in the DB view.</p>
@@ -1334,31 +1371,28 @@ function DbBrowserRow({ db, onOpen }) {
     <button
       type="button"
       onClick={onOpen}
-      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-slate-100 px-3 py-3 text-left transition last:border-b-0 hover:bg-sky-50/70 md:grid-cols-[minmax(0,1fr)_100px_170px_110px_70px]"
+      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-slate-200 px-5 py-4 text-left transition last:border-b-0 hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_100px_170px_120px_70px] lg:px-6"
     >
-      <span className="flex min-w-0 items-center gap-2.5">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-[10px] font-bold text-sky-800 transition group-hover:bg-sky-200">DB</span>
-        <span className="min-w-0">
-          <span className="block truncate font-mono text-sm font-semibold text-slate-950 group-hover:text-primary">{name}</span>
-          <span className="block truncate font-mono text-[11px] text-slate-400">{path}</span>
-        </span>
+      <span className="min-w-0">
+        <span className="block truncate font-mono text-base font-bold text-slate-950 group-hover:text-primary">{name}</span>
+        <span className="mt-0.5 block truncate font-mono text-sm text-slate-600">{path}</span>
       </span>
-      <span className="hidden font-mono text-xs text-slate-600 md:block">{formatBytes(db.local_size_bytes ?? db.size_bytes)}</span>
+      <span className="hidden font-mono text-sm font-semibold text-slate-800 md:block">{formatBytes(db.local_size_bytes ?? db.size_bytes)}</span>
       <span className="hidden flex-wrap items-center gap-1.5 md:flex">
-        <span className={`badge ${onLocal ? 'badge-info' : 'badge-muted'}`}>Local</span>
-        <span className={`badge ${onS3 ? 'bg-indigo-50 text-indigo-700' : 'badge-muted'}`}>S3</span>
+        <span className={`rounded-md border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${onLocal ? 'border-slate-300 bg-white text-slate-700' : 'border-slate-200 bg-slate-50 text-slate-400'}`}>Local</span>
+        <span className={`rounded-md border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${onS3 ? 'border-slate-300 bg-white text-slate-700' : 'border-slate-200 bg-slate-50 text-slate-400'}`}>S3</span>
       </span>
       <span className="hidden md:block">
-        <span className={`badge ${loaded ? 'badge-ok' : 'badge-muted'}`}>{loaded ? 'Loaded' : 'Available'}</span>
+        <span className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-700"><span className="h-2 w-2 rounded-full bg-emerald-600" aria-hidden="true" />{loaded ? 'Loaded' : 'Available'}</span>
       </span>
-      <span className="flex items-center justify-end gap-1 text-xs font-semibold text-primary">
+      <span className="flex items-center justify-end gap-1 text-sm font-bold text-primary">
         Open <span aria-hidden="true">›</span>
       </span>
-      <span className="col-span-2 flex flex-wrap items-center gap-1.5 pl-11 md:hidden">
-        <span className="font-mono text-[11px] text-slate-500">{formatBytes(db.local_size_bytes ?? db.size_bytes)}</span>
-        {onLocal ? <span className="badge badge-info">Local</span> : null}
-        {onS3 ? <span className="badge bg-indigo-50 text-indigo-700">S3</span> : null}
-        <span className={`badge ${loaded ? 'badge-ok' : 'badge-muted'}`}>{loaded ? 'Loaded' : 'Available'}</span>
+      <span className="col-span-2 flex flex-wrap items-center gap-2 md:hidden">
+        <span className="font-mono text-xs font-semibold text-slate-700">{formatBytes(db.local_size_bytes ?? db.size_bytes)}</span>
+        {onLocal ? <span className="rounded-md border border-slate-300 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-700">Local</span> : null}
+        {onS3 ? <span className="rounded-md border border-slate-300 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-700">S3</span> : null}
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700"><span className="h-1.5 w-1.5 rounded-full bg-emerald-600" aria-hidden="true" />{loaded ? 'Loaded' : 'Available'}</span>
       </span>
     </button>
   );
@@ -1367,15 +1401,15 @@ function DbBrowserRow({ db, onOpen }) {
 function DbBreadcrumb({ path, onOpen, disabled }) {
   const parts = path ? path.split('/').filter(Boolean) : [];
   return (
-    <div className={`flex min-w-0 flex-wrap items-center gap-1 text-xs ${disabled ? 'opacity-50' : ''}`}>
-      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Path</span>
-      <button type="button" disabled={disabled} onClick={() => onOpen('')} className="rounded-md bg-white px-2 py-1 font-semibold text-slate-700 hover:bg-slate-100">All databases</button>
+    <div className={`flex min-w-0 flex-wrap items-center gap-2 text-sm ${disabled ? 'opacity-50' : ''}`}>
+      <span className="shrink-0 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-600">Path</span>
+      <button type="button" disabled={disabled} onClick={() => onOpen('')} className="font-semibold text-primary hover:text-slate-950">All databases</button>
       {parts.map((part, idx) => {
         const nextPath = parts.slice(0, idx + 1).join('/');
         return (
           <span key={nextPath} className="flex items-center gap-1">
-            <span className="text-slate-400">/</span>
-            <button type="button" disabled={disabled} onClick={() => onOpen(nextPath)} className="rounded-md bg-white px-2 py-1 font-mono font-semibold text-slate-700 hover:bg-slate-100">{part}</button>
+            <span className="text-slate-300">/</span>
+            <button type="button" disabled={disabled} onClick={() => onOpen(nextPath)} className="font-mono font-bold text-slate-900 hover:text-primary">{part}</button>
           </span>
         );
       })}
@@ -1389,18 +1423,15 @@ function FolderBrowserRow({ folder, onOpen }) {
     <button
       type="button"
       onClick={onOpen}
-      className="group grid w-full grid-cols-[minmax(0,1fr)_100px_90px] items-center gap-3 border-t border-slate-100 px-3 py-2.5 text-left first:border-t-0 transition hover:bg-amber-50/60 md:grid-cols-[minmax(0,1fr)_140px_140px_90px]"
+      className="group grid w-full grid-cols-[minmax(0,1fr)_100px_90px] items-center gap-4 border-b border-slate-200 px-5 py-4 text-left last:border-b-0 transition hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_140px_160px_90px] lg:px-6"
     >
-      <span className="flex min-w-0 items-center gap-2.5">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-100 text-xs font-bold text-amber-800">/</span>
-        <span className="min-w-0">
-          <span className="block truncate font-mono text-sm font-semibold text-slate-950 group-hover:text-amber-900">{folder.name}</span>
-          <span className="block truncate text-[11px] text-slate-400">/{folder.path}</span>
-        </span>
+      <span className="min-w-0">
+        <span className="block truncate font-mono text-base font-bold text-slate-950 group-hover:text-primary">{folder.name}</span>
+        <span className="mt-0.5 block truncate font-mono text-sm text-slate-600">/{folder.path}</span>
       </span>
-      <span className="text-xs font-medium text-slate-600">Folder</span>
-      <span className="hidden text-xs text-slate-500 md:block">{folder.count} database{folder.count === 1 ? '' : 's'}</span>
-      <span className="text-right text-xs font-semibold text-primary">Open</span>
+      <span className="text-sm font-medium text-slate-700">Folder</span>
+      <span className="hidden text-sm text-slate-600 md:block">{folder.count} database{folder.count === 1 ? '' : 's'}</span>
+      <span className="text-right text-sm font-bold text-primary">Open</span>
     </button>
   );
 }
@@ -1409,79 +1440,95 @@ function DbOverviewPanel({ db, dbInfo, namespaces, stats, onOpen, onRefresh }) {
   const liveEntries = namespaces.reduce((sum, item) => sum + Number(item.live_count ?? item.count ?? 0), 0);
   const archivedEntries = namespaces.reduce((sum, item) => sum + Number(item.__kdb_archive_count ?? item.archive_count ?? 0), 0);
   const liveBytes = namespaces.reduce((sum, item) => sum + Number(item.live_bytes ?? item.size_bytes ?? 0), 0);
+  const requestCount = Number(stats?.requests_total || 0);
+  const errorCount = Number(stats?.errors_total || 0);
+  const errorRate = requestCount > 0 ? `${((errorCount / requestCount) * 100).toFixed(1)}%` : '0%';
+  const storage = [truthy(dbInfo?.on_local) ? 'Local' : '', truthy(dbInfo?.on_s3) ? 'S3' : ''].filter(Boolean).join(' + ') || 'Unavailable';
   const tools = [
-    { id: 'crud', title: 'DocumentDB', description: 'Browse namespaces, query documents, and create or update records.', accent: 'bg-sky-50 text-sky-800' },
-    { id: 'identity', title: 'Identity', description: 'Manage users, providers, tokens, status, and identity events.', accent: 'bg-emerald-50 text-emerald-800' },
-    { id: 'files', title: 'Files', description: 'Track file metadata, owners, storage paths, and lifecycle state.', accent: 'bg-amber-50 text-amber-800' },
-    { id: 'metrics', title: 'Metrics', description: 'Ingest metric events and query time-bucketed aggregates.', accent: 'bg-rose-50 text-rose-800' },
-    { id: 'fts', title: 'FTSearch', description: 'Search indexed documents and manage full-text index lifecycle.', accent: 'bg-cyan-50 text-cyan-800' },
-    { id: 'audit', title: 'Audit Logs', description: 'Browse and append immutable actor and resource activity.', accent: 'bg-orange-50 text-orange-800' },
-    { id: 'sqlite', title: 'SQLiteDB', description: 'Browse tables, inspect schema, edit rows, and execute SQL.', accent: 'bg-indigo-50 text-indigo-800' }
+    { id: 'crud', title: 'DocumentDB', description: 'Browse namespaces, query documents, and create or update records.' },
+    { id: 'identity', title: 'Identity', description: 'Manage users, providers, tokens, status, and identity events.' },
+    { id: 'files', title: 'Files', description: 'Track file metadata, owners, storage paths, and lifecycle state.' },
+    { id: 'metrics', title: 'Metrics', description: 'Ingest metric events and query time-bucketed aggregates.' },
+    { id: 'fts', title: 'FTSearch', description: 'Search indexed documents and manage full-text index lifecycle.' },
+    { id: 'audit', title: 'Audit Logs', description: 'Browse and append immutable actor and resource activity.' },
+    { id: 'sqlite', title: 'SQLiteDB', description: 'Browse tables, inspect schema, edit rows, and execute SQL.' }
   ];
 
   return (
     <section className="space-y-4">
-      <PageHeader
-        eyebrow="Database Overview"
-        title={db}
-        description="A quick health check and launch point for this database. Choose a workspace below to continue."
-        actions={<button type="button" onClick={onRefresh} className="btn-secondary">Refresh Overview</button>}
-      />
-
-      <section className="panel">
-        <div className="panel-header-row">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-950">At A Glance</h3>
-            <p className="text-xs text-slate-500">Inventory, storage, and in-memory request counters for the selected database.</p>
+      <section className="overflow-hidden rounded-xl border border-slate-300 bg-white">
+        <div className="flex flex-col gap-5 px-6 py-6 md:flex-row md:items-start md:justify-between lg:px-7">
+          <div className="min-w-0">
+            <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Database Overview</div>
+            <h2 className="mt-3 break-all font-mono text-2xl font-bold tracking-tight text-slate-950 lg:text-3xl">{db}</h2>
+            <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-slate-600">
+              <span>Status <strong className="ml-1 text-slate-950">{truthy(dbInfo?.loaded) ? 'Loaded' : 'Not Loaded'}</strong></span>
+              <span className="hidden h-5 w-px bg-slate-300 sm:block" aria-hidden="true" />
+              <span>Storage <strong className="ml-1 text-slate-950">{storage}</strong></span>
+            </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <span className={`badge ${truthy(dbInfo?.loaded) ? 'badge-ok' : 'badge-muted'}`}>{truthy(dbInfo?.loaded) ? 'Loaded' : 'Not Loaded'}</span>
-            {truthy(dbInfo?.on_local) ? <span className="badge badge-info">Local</span> : null}
-            {truthy(dbInfo?.on_s3) ? <span className="badge badge-warn">S3</span> : null}
-          </div>
+          <button type="button" onClick={onRefresh} className="btn-secondary shrink-0">Refresh</button>
         </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatsTile label="Namespaces" value={formatNumber(namespaces.length)} />
-          <StatsTile label="Live Documents" value={formatNumber(liveEntries)} />
-          <StatsTile label="Archived Documents" value={formatNumber(archivedEntries)} />
-          <StatsTile label="Database Size" value={formatBytes(dbInfo?.local_size_bytes ?? dbInfo?.size_bytes ?? liveBytes)} />
-          <StatsTile label="Requests" value={formatNumber(stats?.requests_total)} />
-          <StatsTile label="Reads" value={formatNumber(stats?.reads_total)} />
-          <StatsTile label="Writes" value={formatNumber(stats?.writes_total)} />
-          <StatsTile label="Errors" value={formatNumber(stats?.errors_total)} />
+
+        <div className="grid border-t border-slate-300 lg:grid-cols-2">
+          <div className="px-6 py-6 lg:border-r lg:border-slate-300 lg:px-7">
+            <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Inventory</h3>
+            <div className="mt-6 grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-4">
+              <OverviewMetric label="Namespaces" value={formatNumber(namespaces.length)} />
+              <OverviewMetric label="Live Documents" value={formatNumber(liveEntries)} />
+              <OverviewMetric label="Archived" value={formatNumber(archivedEntries)} muted={archivedEntries === 0} />
+              <OverviewMetric label="On Disk" value={formatBytes(dbInfo?.local_size_bytes ?? dbInfo?.size_bytes ?? liveBytes)} />
+            </div>
+          </div>
+          <div className="border-t border-slate-300 bg-slate-50/70 px-6 py-6 lg:border-t-0 lg:px-7">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Traffic</h3>
+              <span className="text-xs font-medium text-slate-600">Current runtime</span>
+            </div>
+            <div className="mt-6 grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-4">
+              <OverviewMetric label="Requests" value={formatNumber(requestCount)} />
+              <OverviewMetric label="Reads" value={formatNumber(stats?.reads_total)} />
+              <OverviewMetric label="Writes" value={formatNumber(stats?.writes_total)} />
+              <OverviewMetric label={`Errors · ${errorRate}`} value={formatNumber(errorCount)} danger={errorCount > 0} />
+            </div>
+          </div>
         </div>
       </section>
 
       <section>
-        <div className="mb-3">
-          <h3 className="text-base font-semibold text-slate-950">Open A Workspace</h3>
-          <p className="mt-1 text-sm text-slate-500">Each tool stays scoped to <span className="font-mono text-slate-700">{db}</span>.</p>
+        <div className="mb-4">
+          <h3 className="text-xl font-bold tracking-tight text-slate-950">Workspaces</h3>
+          <p className="mt-1 text-sm font-medium text-slate-600">Every workspace stays scoped to <span className="font-mono font-semibold text-slate-800">{db}</span>.</p>
         </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {tools.map((tool) => (
-            <button key={tool.id} type="button" onClick={() => onOpen(tool.id)} className="group rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-md">
-              <span className={`inline-flex rounded-lg px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${tool.accent}`}>{tool.title}</span>
-              <p className="mt-4 text-xs leading-5 text-slate-500">{tool.description}</p>
-              <div className="mt-5 text-xs font-semibold text-primary">Open {tool.title} <span aria-hidden="true">→</span></div>
+            <button key={tool.id} type="button" onClick={() => onOpen(tool.id)} className="min-h-40 rounded-xl border border-slate-300 bg-white p-5 text-left transition hover:border-slate-500 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/30">
+              <h4 className="text-lg font-bold tracking-tight text-slate-950">{tool.title}</h4>
+              <p className="mt-2 text-sm font-medium leading-6 text-slate-600">{tool.description}</p>
             </button>
           ))}
-        </div>
-      </section>
-
-      <section className="panel p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-950">More Database Tools</h3>
-            <p className="mt-1 text-xs text-slate-500">Run raw gateway requests, inspect detailed stats, or perform database maintenance.</p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => onOpen('query')} className="btn-secondary">Query</button>
-            <button type="button" onClick={() => onOpen('stats')} className="btn-secondary">Stats</button>
-            <button type="button" onClick={() => onOpen('admin')} className="btn-secondary">Database Admin</button>
+          <div className="min-h-40 rounded-xl border border-dashed border-slate-400 bg-transparent p-5">
+            <h4 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">More Tools</h4>
+            <div className="mt-3 space-y-1">
+              <button type="button" onClick={() => onOpen('query')} className="block text-base font-semibold text-slate-800 hover:text-slate-950 hover:underline">Query</button>
+              <button type="button" onClick={() => onOpen('stats')} className="block text-base font-semibold text-slate-800 hover:text-slate-950 hover:underline">Stats</button>
+              <button type="button" onClick={() => onOpen('admin')} className="block text-base font-semibold text-slate-800 hover:text-slate-950 hover:underline">Database Admin</button>
+            </div>
           </div>
         </div>
       </section>
     </section>
+  );
+}
+
+function OverviewMetric({ label, value, muted = false, danger = false }) {
+  const valueTone = danger ? 'text-rose-700' : muted ? 'text-slate-400' : 'text-slate-950';
+  const labelTone = danger ? 'text-rose-700' : 'text-slate-600';
+  return (
+    <div className="min-w-0">
+      <div className={`break-words font-mono text-3xl font-bold leading-none tracking-tight ${valueTone}`}>{value ?? 'n/a'}</div>
+      <div className={`mt-3 text-sm font-medium ${labelTone}`}>{label}</div>
+    </div>
   );
 }
 
@@ -1542,9 +1589,9 @@ function NamespaceTabs({ tabs, active, onSelect, onClose, actions }) {
   return (
     <section className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex min-w-0 items-center flex-wrap gap-2">
-        <div className="text-xs text-muted font-thin">Namespaces:</div>
+        <div className="text-xs font-medium text-muted">Namespaces:</div>
         {tabs.map((namespace) => (
-          <div key={namespace} className={`flex items-center overflow-hidden rounded-lg border text-sm shadow-sm ${active === namespace ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-700'}`}>
+          <div key={namespace} className={`flex items-center overflow-hidden rounded-lg border text-sm ${active === namespace ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-700'}`}>
             <button onClick={() => onSelect(namespace)} className="px-3 py-2 font-mono text-xs font-semibold">{namespace}</button>
             <button onClick={() => onClose(namespace)} className={`border-l px-2 py-2 text-xs font-semibold ${active === namespace ? 'border-white/20 hover:bg-white/10' : 'border-slate-200 hover:bg-slate-100'}`}>x</button>
           </div>
@@ -1976,8 +2023,8 @@ function FileCatalogForm({ form, onChange, mode }) {
 
 function FileCatalogDetail({ file, onClose, onEdit, onSoftDelete, onPurge }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="File Details">
-      <section className="w-full max-w-3xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-label="File Details">
+      <section className="w-full max-w-3xl overflow-hidden rounded-2xl border border-slate-300 bg-white">
         <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -2222,7 +2269,7 @@ function DatastoreQueryWizard({ namespace, namespaces, form, open, onToggle, onN
                 <div className="field-label">Filter</div>
                 <p className="text-[11px] text-slate-500">Builder rules compile into JQL. Use JSON for advanced filters.</p>
               </div>
-              <div className="flex rounded-lg bg-white p-1 shadow-sm ring-1 ring-slate-200">
+              <div className="flex rounded-lg border border-slate-200 bg-white p-1">
                 <button type="button" onClick={() => setFilterMode('builder')} className={`btn-tab ${filterMode === 'builder' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Builder</button>
                 <button type="button" onClick={() => setFilterMode('json')} className={`btn-tab ${filterMode === 'json' ? 'btn-tab-active' : 'btn-tab-idle'}`}>JSON</button>
               </div>
@@ -2252,7 +2299,7 @@ function DatastoreQueryWizard({ namespace, namespaces, form, open, onToggle, onN
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {rules.map((rule) => (
-                        <span key={rule.id} className="inline-flex max-w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs shadow-sm">
+                        <span key={rule.id} className="inline-flex max-w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs">
                           <span className="truncate font-mono font-semibold text-slate-900">{rule.field}</span>
                           <span className="text-slate-500">{rule.op}</span>
                           <span className="max-w-[180px] truncate font-mono text-slate-600">{rule.value || 'null'}</span>
@@ -2382,7 +2429,7 @@ function RequestHistory({ items, onUse, onClear }) {
       {items.length ? (
         <div className="flex gap-2 overflow-auto pb-1">
           {items.map((item) => (
-            <button key={item.id} onClick={() => onUse(item)} className="min-w-[220px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-left shadow-sm transition hover:border-emerald-400 hover:bg-emerald-50">
+            <button key={item.id} onClick={() => onUse(item)} className="min-w-[220px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-left transition hover:border-emerald-400 hover:bg-emerald-50">
               <div className="truncate font-mono text-xs font-semibold text-slate-950">{item.operation}{item.namespace ? ` · ${item.namespace}` : ''}</div>
               <div className="mt-1 truncate text-[11px] text-slate-500">{formatTimestamp(item.at)}</div>
             </button>
@@ -2583,8 +2630,8 @@ function EntryModal({ modal, onChange, onClose, onSubmit }) {
   const canSwitchEditor = modal.mode === 'create' || modal.mode === 'edit';
   const editorMode = canSwitchEditor ? (modal.editorMode || 'json') : 'json';
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="max-h-[94vh] w-full max-w-6xl overflow-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="max-h-[94vh] w-full max-w-6xl overflow-auto rounded-2xl border border-slate-300 bg-white">
         <div className="sticky top-0 z-30 flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 bg-white px-5 py-4">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">{title}</h3>
@@ -2692,7 +2739,7 @@ function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson }) {
   const document = normalizeDocumentForDisplay(row);
   const documentText = pretty(document);
   return (
-    <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-5xl flex-col border-l border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-5xl flex-col border-l border-slate-300 bg-white">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
         <div className="min-w-0">
           <h3 className="text-lg font-semibold text-slate-950">Document Details</h3>
@@ -2733,8 +2780,8 @@ function BatchActionModal({ modal, onChange, onClose, onSubmit }) {
   const submitLabel = modal.action === 'set_ttl' ? 'Set TTL' : modal.action === 'purge' ? 'Purge documents' : 'Delete documents';
   const danger = modal.action === 'purge' || modal.action === 'delete';
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="w-full max-w-xl rounded-2xl border border-slate-300 bg-white">
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">{title}</h3>
@@ -3602,8 +3649,8 @@ function IdentityUsersTable({ title = 'Latest Identities', users, response, dura
 function IdentityBulkModal({ modal, selectedCount, onChange, onClose, onSubmit }) {
   const isStatus = modal.action === 'status';
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="w-full max-w-lg rounded-2xl border border-slate-300 bg-white">
         <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">{isStatus ? 'Update Selected Status' : 'Delete Selected Users'}</h3>
@@ -3635,8 +3682,8 @@ function IdentityUserDetailPanel({ details, tab, onTab, onClose, onEdit, provide
   const providers = details.providers || [];
   const events = details.events || [];
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <section className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <section className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-300 bg-white">
         <div className="border-b border-slate-200 px-5 py-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -4418,7 +4465,7 @@ function TableDangerActions({ onDeleteAll, onDrop }) {
         !
       </button>
       {open ? (
-        <div id={menuId} role="menu" className="absolute left-0 top-full z-20 mt-1 min-w-48 rounded-xl border border-rose-200 bg-white p-2 shadow-lg">
+        <div id={menuId} role="menu" className="absolute left-0 top-full z-20 mt-1 min-w-48 rounded-xl border border-rose-300 bg-white p-2">
           <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-rose-500">Danger Actions</div>
           <button ref={firstItemRef} type="button" role="menuitem" onClick={() => run(onDeleteAll)} className="block w-full rounded-lg px-2 py-1.5 text-left text-xs font-semibold text-rose-700 hover:bg-rose-50 focus:bg-rose-50 focus:outline-none">Delete All Rows</button>
           <button type="button" role="menuitem" onClick={() => run(onDrop)} className="mt-1 block w-full rounded-lg px-2 py-1.5 text-left text-xs font-semibold text-rose-700 hover:bg-rose-50 focus:bg-rose-50 focus:outline-none">Drop Table</button>
@@ -4510,8 +4557,8 @@ function CreateSqlTableModal({ onClose, onSubmit }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-2xl border border-slate-300 bg-white">
         <div className="panel-header-row">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">Create Table</h3>
@@ -4591,8 +4638,8 @@ function SqlRowModal({ modal, onChange, onClose, onSubmit }) {
   const editableColumns = modal.schema.filter((column) => !column.isPrimaryKey);
   const primaryKeys = modal.schema.filter((column) => column.isPrimaryKey);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="w-full max-w-3xl rounded-2xl border border-slate-300 bg-white">
         <div className="panel-header-row">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">Edit Row</h3>
@@ -4643,8 +4690,8 @@ function SqlInsertModal({ modal, onChange, onClose, onSubmit }) {
   const primaryKeys = modal.schema.filter((column) => column.isPrimaryKey);
   const columns = modal.schema.filter((column) => !column.isPrimaryKey);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
-      <div className="max-h-[92vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="max-h-[92vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-slate-300 bg-white">
         <div className="panel-header-row">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">Insert Row</h3>
@@ -5029,7 +5076,7 @@ function dbFilterLabel(filter) {
 }
 
 function namespaceLabel(item) {
-  return String(item?.namespace || item?.collection || item?.name || item || '');
+  return String(item?.namespace || item?.name || item || '');
 }
 
 function quoteIdent(value) {
@@ -5298,7 +5345,16 @@ function documentUserId(row) {
 }
 
 function namespaceFromRow(row) {
-  return String(row?._namespace || row?.namespace || row?.collection || '');
+  return String(row?._namespace || row?.namespace || '');
+}
+
+function isConcreteNamespace(value) {
+  return typeof value === 'string' && value.trim() !== '' && value.trim() !== '*';
+}
+
+function namespaceSummary(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean).join(', ');
+  return typeof value === 'string' ? value : '';
 }
 
 function normalizeDocumentForDisplay(row) {
@@ -5319,7 +5375,6 @@ function normalizeDocumentForEdit(row) {
   if (id && !out._id) out._id = id;
   delete out._namespace;
   delete out.namespace;
-  delete out.collection;
   delete out._user_id;
   return out;
 }

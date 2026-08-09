@@ -449,7 +449,7 @@ async fn list_transitions(
     let mut binds = Vec::<libsql::Value>::new();
     for (column, value) in [
         ("document_id", clean_optional(payload.document_id.clone()).or_else(|| clean_optional(payload.id.clone()))),
-        ("collection", clean_optional(payload.collection.clone())),
+        ("namespace", clean_optional(payload.collection.clone())),
         ("name", clean_optional(payload.name.clone())),
         ("status", clean_optional(payload.status.clone())),
     ] {
@@ -604,7 +604,7 @@ async fn run_one_document_transition(
         let row = rows.next().await.map_err(|e| AppError::Internal(format!("transition row failed: {e}")))?
             .ok_or_else(|| AppError::Internal("claimed transition disappeared".to_string()))?;
         let document_id: String = row.get(0).map_err(|e| AppError::Internal(format!("transition document decode failed: {e}")))?;
-        let collection: String = row.get(1).map_err(|e| AppError::Internal(format!("transition collection decode failed: {e}")))?;
+        let collection: String = row.get(1).map_err(|e| AppError::Internal(format!("transition namespace decode failed: {e}")))?;
         let condition_raw: String = row.get(2).map_err(|e| AppError::Internal(format!("transition condition decode failed: {e}")))?;
         let update_raw: String = row.get(3).map_err(|e| AppError::Internal(format!("transition update decode failed: {e}")))?;
         let ttl_seconds: Option<i64> = row.get(4).map_err(|e| AppError::Internal(format!("transition ttl decode failed: {e}")))?;
@@ -754,7 +754,7 @@ pub async fn process_document_transitions_tick(state: &AppState) -> AppResult<us
     for db in dbs {
         let request = GatewayRequest {
             db: Some(db.clone()), operation: "__run_document_transitions".to_string(),
-            namespace: None, namespaces: None, payload: OperationPayload::default(), data: None,
+            namespace: None, payload: OperationPayload::default(),
         };
         match state.enqueue_committed_write(&db, request).await? {
             crate::state::WriteEnqueueResult::Committed(result) => {

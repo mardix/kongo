@@ -504,7 +504,7 @@ function AddValueMenu({ label, onAdd, primary = false, compact = false }) {
         <>
           <button type="button" onClick={() => setOpen(false)} className="fixed inset-0 z-[80] cursor-default bg-transparent" aria-label="Close type menu" />
           <div
-            className="fixed z-[90] overflow-y-auto rounded-lg border border-slate-200 bg-white p-1 shadow-xl"
+            className="fixed z-[90] overflow-y-auto rounded-lg border border-slate-300 bg-white p-1"
             data-placement={position.opensUp ? 'top' : 'bottom'}
             style={{
               top: `${position.top}px`,

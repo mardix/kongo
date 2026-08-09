@@ -16,7 +16,10 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use uuid::Uuid;
 
 use crate::{
-    api::dto::{CacheHint, GatewayRequest, GatewayResponse, MultiQueryItem, OperationPayload},
+    api::dto::{
+        BatchOperation, CacheHint, GatewayRequest, GatewayResponse, NamespaceSelector,
+        OperationPayload,
+    },
     error::{AppError, AppResult},
     query::jql::build_where,
     state::AppState,

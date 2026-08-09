@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Kongo data cube mark</title>
+  <rect width="64" height="64" rx="14" fill="#6ee7b7"/>
+  <path d="M32 8 53 19.5v25L32 56 11 44.5v-25L32 8Z" fill="#0f172a"/>
+  <path d="m32 13 15.8 8.7L32 30.4l-15.8-8.7L32 13Z" fill="#e0f2fe"/>
+  <path d="m16 27 13 7.2v15.1l-13-7.1V27Z" fill="#38bdf8"/>
+  <path d="m48 27-13 7.2v15.1l13-7.1V27Z" fill="#0ea5e9"/>
+  <circle cx="32" cy="32" r="4" fill="#6ee7b7"/>
+</svg>

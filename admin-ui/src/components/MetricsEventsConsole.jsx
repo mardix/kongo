@@ -623,7 +623,7 @@ function MetricsCatalogPanel({ events, dimensions, selectedEvent, loading, error
                 key={eventName}
                 type="button"
                 onClick={() => onSelectEvent(eventName)}
-                className={`w-full rounded-md px-3 py-2 text-left text-xs font-semibold transition ${selectedEvent === eventName ? 'bg-slate-950 text-white shadow-sm' : 'text-slate-700 hover:bg-white hover:text-slate-950'}`}
+                className={`w-full rounded-md px-3 py-2 text-left text-xs font-semibold transition ${selectedEvent === eventName ? 'bg-slate-950 text-white' : 'text-slate-700 hover:bg-white hover:text-slate-950'}`}
               >
                 {eventName}
               </button>

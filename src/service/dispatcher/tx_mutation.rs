@@ -87,33 +87,66 @@ async fn transaction(
     conn: &libsql::Connection,
     req: GatewayRequest,
 ) -> AppResult<GatewayResponse> {
-    let ops = req
-        .data
-        .ok_or_else(|| AppError::BadRequest("transaction requires data[]".to_string()))?;
+    let (on_error, ops) = prepare_transaction_operations(req.payload)?;
+    let count = ops.len();
 
     let tx = conn
         .transaction()
         .await
         .map_err(|e| AppError::Internal(format!("tx begin failed: {e}")))?;
 
-    let mut executed = 0_usize;
+    let mut succeeded = 0_usize;
+    let mut failed = 0_usize;
     let mut skipped = 0_usize;
+    let mut results = Vec::<Value>::with_capacity(count);
     for op in ops {
-        match op.operation.as_str() {
-            "insert" => {
-                if !tx_insert(&tx, &op.payload).await? {
-                    skipped += 1;
+        let savepoint = format!("__kdb_tx_op_{}", op.index);
+        if on_error == BatchOnError::Continue {
+            tx.execute(&format!("SAVEPOINT {savepoint}"), ())
+                .await
+                .map_err(|e| AppError::Internal(format!("tx savepoint failed: {e}")))?;
+        }
+
+        match execute_transaction_operation(state, &tx, &op).await {
+            Ok(TransactionOperationOutcome::Applied(data)) => {
+                if on_error == BatchOnError::Continue {
+                    release_transaction_savepoint(&tx, &savepoint).await?;
                 }
+                succeeded += 1;
+                results.push(transaction_operation_result(
+                    &op,
+                    "success",
+                    data,
+                    None,
+                ));
             }
-            "update" => tx_update(&tx, &op.payload).await?,
-            "delete" => tx_delete(&tx, &op.payload).await?,
-            _ => {
-                return Err(AppError::BadRequest(
-                    "transaction currently supports insert/update/delete".to_string(),
+            Ok(TransactionOperationOutcome::Skipped) => {
+                if on_error == BatchOnError::Continue {
+                    release_transaction_savepoint(&tx, &savepoint).await?;
+                }
+                skipped += 1;
+                results.push(transaction_operation_result(
+                    &op,
+                    "skipped",
+                    None,
+                    Some(json!({
+                        "code": "unique_fields_conflict",
+                        "message": "insert skipped by on_conflict policy"
+                    })),
+                ));
+            }
+            Err(error) if on_error == BatchOnError::Fail => return Err(error),
+            Err(error) => {
+                rollback_transaction_savepoint(&tx, &savepoint).await?;
+                failed += 1;
+                results.push(transaction_operation_result(
+                    &op,
+                    "error",
+                    None,
+                    Some(batch_error_value(error)),
                 ));
             }
         }
-        executed += 1;
     }
 
     tx.commit()
@@ -125,15 +158,281 @@ async fn transaction(
         .append_wal_record(
             db_path,
             "TRANSACTION",
-            &json!({ "count": executed }).to_string(),
+            &json!({
+                "count": count,
+                "succeeded": succeeded,
+                "failed": failed,
+                "skipped_count": skipped
+            })
+            .to_string(),
         )
         .await?;
 
-    Ok(GatewayResponse::ok(Some(json!({
-        "count": executed,
+    let mut response = GatewayResponse::ok(Some(json!({
+        "count": count,
+        "succeeded": succeeded,
+        "failed": failed,
         "skipped_count": skipped,
+        "results": results,
         "message": "transaction_committed"
-    }))))
+    })));
+    if failed > 0 {
+        response.status = "partial";
+    }
+    Ok(response)
+}
+
+#[derive(Debug)]
+struct PreparedTransactionOperation {
+    index: usize,
+    operation: String,
+    alias: Option<String>,
+    namespace: Option<String>,
+    payload: OperationPayload,
+}
+
+#[derive(Debug)]
+enum TransactionOperationOutcome {
+    Applied(Option<Value>),
+    Skipped,
+}
+
+fn prepare_transaction_operations(
+    mut payload: OperationPayload,
+) -> AppResult<(BatchOnError, Vec<PreparedTransactionOperation>)> {
+    let on_error = parse_batch_on_error(payload.on_error.as_deref(), "transaction")?;
+    let operations = payload.operations.take().ok_or_else(|| {
+        AppError::BadRequest("transaction requires payload.operations[]".to_string())
+    })?;
+    if operations.is_empty() {
+        return Err(AppError::BadRequest(
+            "transaction payload.operations[] cannot be empty".to_string(),
+        ));
+    }
+
+    operations
+        .into_iter()
+        .enumerate()
+        .map(|(index, operation)| prepare_transaction_operation(operation, index))
+        .collect::<AppResult<Vec<_>>>()
+        .map(|operations| (on_error, operations))
+}
+
+fn prepare_transaction_operation(
+    operation: BatchOperation,
+    index: usize,
+) -> AppResult<PreparedTransactionOperation> {
+    let BatchOperation {
+        operation,
+        alias,
+        mut namespace,
+        mut payload,
+    } = operation;
+    let mut operation = operation
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if operation.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "transaction operations[{index}].operation is required"
+        )));
+    }
+
+    if let Some((raw_operation, raw_scope)) = operation.clone().split_once("::") {
+        if namespace.is_some() {
+            return Err(AppError::BadRequest(format!(
+                "transaction operations[{index}] operation shorthand cannot be combined with namespace"
+            )));
+        }
+        operation = raw_operation.trim().to_string();
+        let scope = raw_scope.trim();
+        if operation.is_empty() || scope.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "transaction operations[{index}] has invalid operation shorthand"
+            )));
+        }
+        if scope == "*" {
+            namespace = Some(NamespaceSelector::One("*".to_string()));
+        } else if scope.contains(',') {
+            namespace = Some(NamespaceSelector::Many(
+                scope
+                    .split(',')
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect(),
+            ));
+        } else {
+            namespace = Some(NamespaceSelector::One(scope.to_string()));
+        }
+    }
+
+    if !matches!(
+        operation.as_str(),
+        "insert" | "update" | "upsert" | "delete"
+    ) {
+        return Err(AppError::BadRequest(format!(
+            "transaction operations[{index}] supports only insert/update/upsert/delete"
+        )));
+    }
+    normalize_transaction_operation_scope(&mut payload, namespace, index)?;
+    let namespace = payload.collection.clone();
+    let alias = alias
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Ok(PreparedTransactionOperation {
+        index,
+        operation,
+        alias,
+        namespace,
+        payload,
+    })
+}
+
+fn normalize_transaction_operation_scope(
+    payload: &mut OperationPayload,
+    namespace: Option<NamespaceSelector>,
+    index: usize,
+) -> AppResult<()> {
+    let Some(namespace) = namespace else { return Ok(()); };
+    if let NamespaceSelector::Many(raw_namespaces) = namespace {
+        if payload.collection.is_some() {
+            return Err(AppError::BadRequest(format!(
+                "transaction operations[{index}] has conflicting namespace selectors"
+            )));
+        }
+        let mut normalized = raw_namespaces
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        normalized.sort();
+        normalized.dedup();
+        if normalized.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "transaction operations[{index}].namespace array cannot be empty"
+            )));
+        }
+        if normalized.iter().any(|value| value == "*") && normalized.len() > 1 {
+            return Err(AppError::BadRequest(format!(
+                "transaction operations[{index}].namespace array cannot combine '*' with other values"
+            )));
+        }
+        if normalized.len() == 1 && normalized[0] == "*" {
+            payload.scope = Some("all".to_string());
+        }
+        payload.namespaces = Some(normalized);
+        return Ok(());
+    }
+
+    let NamespaceSelector::One(namespace) = namespace else {
+        unreachable!("namespace array handled above")
+    };
+    let namespace = namespace.trim().to_string();
+    if namespace.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "transaction operations[{index}].namespace cannot be empty"
+        )));
+    }
+    if payload
+        .namespaces
+        .as_ref()
+        .map(|values| !values.is_empty())
+        .unwrap_or(false)
+    {
+        return Err(AppError::BadRequest(format!(
+            "transaction operations[{index}] namespace conflicts with payload.namespaces"
+        )));
+    }
+    if namespace == "*" {
+        payload.collection = None;
+        payload.namespaces = Some(vec!["*".to_string()]);
+        payload.scope = Some("all".to_string());
+    } else if let Some(existing) = payload.collection.as_deref() {
+        if existing != namespace {
+            return Err(AppError::BadRequest(format!(
+                "transaction operations[{index}] has conflicting namespace selectors"
+            )));
+        }
+    } else {
+        payload.collection = Some(namespace);
+    }
+    Ok(())
+}
+
+async fn execute_transaction_operation(
+    state: &AppState,
+    tx: &libsql::Transaction,
+    operation: &PreparedTransactionOperation,
+) -> AppResult<TransactionOperationOutcome> {
+    match operation.operation.as_str() {
+        "insert" => Ok(if tx_insert(tx, &operation.payload).await? {
+            TransactionOperationOutcome::Applied(None)
+        } else {
+            TransactionOperationOutcome::Skipped
+        }),
+        "update" => {
+            tx_update(tx, &operation.payload).await?;
+            Ok(TransactionOperationOutcome::Applied(None))
+        }
+        "upsert" => {
+            let data = tx_upsert(state, tx, &operation.payload).await?;
+            Ok(TransactionOperationOutcome::Applied(Some(data)))
+        }
+        "delete" => {
+            tx_delete(tx, &operation.payload).await?;
+            Ok(TransactionOperationOutcome::Applied(None))
+        }
+        _ => unreachable!("transaction operation validated before execution"),
+    }
+}
+
+async fn release_transaction_savepoint(
+    tx: &libsql::Transaction,
+    savepoint: &str,
+) -> AppResult<()> {
+    tx.execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+        .await
+        .map_err(|e| AppError::Internal(format!("tx savepoint release failed: {e}")))?;
+    Ok(())
+}
+
+async fn rollback_transaction_savepoint(
+    tx: &libsql::Transaction,
+    savepoint: &str,
+) -> AppResult<()> {
+    tx.execute(&format!("ROLLBACK TO SAVEPOINT {savepoint}"), ())
+        .await
+        .map_err(|e| AppError::Internal(format!("tx savepoint rollback failed: {e}")))?;
+    release_transaction_savepoint(tx, savepoint).await
+}
+
+fn transaction_operation_result(
+    operation: &PreparedTransactionOperation,
+    status: &str,
+    data: Option<Value>,
+    detail: Option<Value>,
+) -> Value {
+    let mut result = json!({
+        "index": operation.index,
+        "operation": operation.operation,
+        "status": status
+    });
+    let object = result.as_object_mut().expect("transaction result is object");
+    if let Some(alias) = operation.alias.as_ref() {
+        object.insert("alias".to_string(), Value::String(alias.clone()));
+    }
+    if let Some(namespace) = operation.namespace.as_ref() {
+        object.insert("namespace".to_string(), Value::String(namespace.clone()));
+    }
+    if let Some(data) = data {
+        object.insert("data".to_string(), data);
+    }
+    if let Some(detail) = detail {
+        let key = if status == "error" { "error" } else { "reason" };
+        object.insert(key.to_string(), detail);
+    }
+    result
 }
 
 async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<bool> {
@@ -144,7 +443,9 @@ async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
     let allow_system_timestamps = payload.allow_system_timestamps.unwrap_or(false);
     let id = ensure_or_get_id(&mut doc)?;
     let unique_fields = normalize_unique_fields(payload.unique_fields.clone())?;
-    let on_conflict = parse_insert_on_conflict(payload.on_conflict.as_deref())?;
+    let on_conflict = parse_insert_on_conflict(Some(
+        payload.on_conflict.as_deref().unwrap_or("error"),
+    ))?;
     if !unique_fields.is_empty() {
         let pairs = resolve_unique_pairs(&doc, &unique_fields)?;
         if !pairs.is_empty() && exists_by_unique_pairs_on_tx(tx, &collection, &pairs).await? {
@@ -281,6 +582,79 @@ async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
         }
     }
     Ok(())
+}
+
+async fn tx_upsert(
+    state: &AppState,
+    tx: &libsql::Transaction,
+    payload: &OperationPayload,
+) -> AppResult<Value> {
+    let lifecycle_specs = parse_document_lifecycle(payload.lifecycle.clone())?;
+    if !lifecycle_specs.is_empty() && payload.max_docs.unwrap_or(1) != 1 {
+        return Err(AppError::BadRequest(
+            "upsert with lifecycle requires max_docs=1".to_string(),
+        ));
+    }
+
+    let mut inner_payload = payload.clone();
+    inner_payload.lifecycle = None;
+    let request = GatewayRequest {
+        db: None,
+        operation: "upsert".to_string(),
+        namespace: None,
+        payload: inner_payload,
+    };
+    let mut response = Box::pin(upsert_inner(state, None, tx, request)).await?;
+
+    if !lifecycle_specs.is_empty() {
+        if payload.dry_run.unwrap_or(false) {
+            add_lifecycle_dry_run_response(&mut response, &lifecycle_specs);
+        } else {
+            let document_id = response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("items"))
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("_id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AppError::Internal(
+                        "transaction upsert lifecycle result document id missing".to_string(),
+                    )
+                })?
+                .to_string();
+            let collection = resolve_transition_document(tx, &document_id, None).await?;
+            for spec in &lifecycle_specs {
+                upsert_transition_on_tx(tx, &document_id, &collection, spec).await?;
+            }
+            add_lifecycle_response(&mut response, &lifecycle_specs);
+        }
+    }
+
+    let mut data = response
+        .data
+        .take()
+        .ok_or_else(|| AppError::Internal("transaction upsert result data missing".to_string()))?;
+    let inserted = data
+        .get("inserted_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let updated = data
+        .get("updated_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let action = if payload.dry_run.unwrap_or(false) || (inserted == 0 && updated == 0) {
+        "no_change"
+    } else if inserted > 0 {
+        "inserted"
+    } else {
+        "updated"
+    };
+    data.as_object_mut()
+        .ok_or_else(|| AppError::Internal("transaction upsert result must be object".to_string()))?
+        .insert("action".to_string(), Value::String(action.to_string()));
+    Ok(data)
 }
 
 async fn tx_delete(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<()> {
@@ -677,7 +1051,7 @@ fn require_collection(payload: &OperationPayload) -> AppResult<String> {
         .unwrap_or(false)
     {
         return Err(AppError::BadRequest(
-            "namespace must be a single value for this operation (namespaces[] is not allowed)"
+            "namespace must be a single string for this operation (an array is not allowed)"
                 .to_string(),
         ));
     }
@@ -695,12 +1069,12 @@ fn require_collection(payload: &OperationPayload) -> AppResult<String> {
 }
 
 fn resolve_collection_scope(payload: &OperationPayload) -> AppResult<Option<String>> {
-    let scope = payload.scope.as_deref().unwrap_or("collection");
+    let scope = payload.scope.as_deref().unwrap_or("namespace");
     match scope {
         "all" => Ok(None),
-        "collection" => Ok(Some(require_collection(payload)?)),
+        "namespace" => Ok(Some(require_collection(payload)?)),
         _ => Err(AppError::BadRequest(
-            "scope must be either 'collection' or 'all'".to_string(),
+            "scope must be either 'namespace' or 'all'".to_string(),
         )),
     }
 }
@@ -708,12 +1082,12 @@ fn resolve_collection_scope(payload: &OperationPayload) -> AppResult<Option<Stri
 fn resolve_collection_scope_optional_collection(
     payload: &OperationPayload,
 ) -> AppResult<Option<String>> {
-    let scope = payload.scope.as_deref().unwrap_or("collection");
+    let scope = payload.scope.as_deref().unwrap_or("namespace");
     match scope {
         "all" => Ok(None),
-        "collection" => Ok(payload.collection.clone().filter(|c| !c.trim().is_empty())),
+        "namespace" => Ok(payload.collection.clone().filter(|c| !c.trim().is_empty())),
         _ => Err(AppError::BadRequest(
-            "scope must be either 'collection' or 'all'".to_string(),
+            "scope must be either 'namespace' or 'all'".to_string(),
         )),
     }
 }
@@ -2208,7 +2582,7 @@ fn build_kdb_archive_target_where(
     let mode_count = (has_txn as u8) + (has_ids as u8) + ((has_collection || has_filter) as u8);
     if mode_count != 1 {
         return Err(AppError::BadRequest(
-            "provide exactly one target mode: txn_id OR ids OR collection/filter".to_string(),
+            "provide exactly one target mode: txn_id OR ids OR namespace/filter".to_string(),
         ));
     }
 
@@ -2231,10 +2605,10 @@ fn build_kdb_archive_target_where(
         return Ok((format!("id IN ({placeholders})"), binds));
     }
 
-    let scope = payload.scope.as_deref().unwrap_or("collection");
+    let scope = payload.scope.as_deref().unwrap_or("namespace");
     let collection = match scope {
         "all" => None,
-        "collection" => {
+        "namespace" => {
             if has_collection {
                 payload.collection.clone()
             } else {
@@ -2243,13 +2617,13 @@ fn build_kdb_archive_target_where(
         }
         _ => {
             return Err(AppError::BadRequest(
-                "scope must be either 'collection' or 'all'".to_string(),
+                "scope must be either 'namespace' or 'all'".to_string(),
             ));
         }
     };
-    if scope == "collection" && collection.is_none() && has_filter {
+    if scope == "namespace" && collection.is_none() && has_filter {
         return Err(AppError::BadRequest(
-            "collection is required for filter mode unless scope='all'".to_string(),
+            "namespace is required for filter mode unless scope='all'".to_string(),
         ));
     }
 
@@ -2296,5 +2670,66 @@ fn resolve_source(params: &OperationPayload) -> &'static str {
         "(SELECT * FROM __kdb_documents UNION ALL SELECT * FROM __kdb_archive)"
     } else {
         "__kdb_documents"
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+
+    fn payload(value: Value) -> OperationPayload {
+        serde_json::from_value(value).expect("valid operation payload")
+    }
+
+    #[test]
+    fn transaction_operations_default_to_fail_and_normalize_scope() {
+        let request = payload(json!({
+            "operations": [
+                {
+                    "alias": "create-user",
+                    "operation": "insert::users",
+                    "payload": {"data": {"name": "Ada"}}
+                }
+            ]
+        }));
+
+        let (on_error, operations) =
+            prepare_transaction_operations(request).expect("valid transaction");
+        assert_eq!(on_error, BatchOnError::Fail);
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].operation, "insert");
+        assert_eq!(operations[0].alias.as_deref(), Some("create-user"));
+        assert_eq!(operations[0].payload.collection.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn transaction_operations_validate_policy_and_operation() {
+        let invalid_policy = payload(json!({
+            "on_error": "skip",
+            "operations": [{"operation": "insert", "namespace": "users", "payload": {}}]
+        }));
+        assert!(prepare_transaction_operations(invalid_policy).is_err());
+
+        let missing_operation = payload(json!({
+            "operations": [{"namespace": "users", "payload": {}}]
+        }));
+        assert!(prepare_transaction_operations(missing_operation).is_err());
+
+        let upsert = payload(json!({
+            "operations": [{
+                "alias": "ensure-user",
+                "operation": "upsert",
+                "namespace": "users",
+                "payload": {
+                    "filter": {"email": "ada@example.com"},
+                    "insert_data": {"email": "ada@example.com"},
+                    "update_data": {"visits": {"$inc": 1}}
+                }
+            }]
+        }));
+        let (_, operations) =
+            prepare_transaction_operations(upsert).expect("transaction upsert is supported");
+        assert_eq!(operations[0].operation, "upsert");
+        assert_eq!(operations[0].namespace.as_deref(), Some("users"));
     }
 }

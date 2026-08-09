@@ -579,9 +579,12 @@ fn apply_projection(
         if let Some(user_id) = doc.get("_user_id") {
             obj.insert("_user_id".to_string(), user_id.clone());
         }
+        if let Some(namespace) = doc.get("_namespace") {
+            obj.insert("_namespace".to_string(), namespace.clone());
+        }
         for path in include_paths {
             validate_projection_path(path, "fields")?;
-            if path == "_id" || path == "_user_id" {
+            if path == "_id" || path == "_user_id" || path == "_namespace" {
                 continue;
             }
             if let Some(v) = value_by_path(doc, path) {
@@ -601,7 +604,7 @@ fn apply_projection(
         }
         for path in excludes {
             validate_projection_path(path, "exclude_fields")?;
-            if path == "_id" || path == "_user_id" {
+            if path == "_id" || path == "_user_id" || path == "_namespace" {
                 continue;
             }
             remove_value_by_path(&mut out, path)?;
@@ -614,6 +617,11 @@ fn apply_projection(
         if let Some(user_id) = doc.get("_user_id") {
             if let Some(obj) = out.as_object_mut() {
                 obj.insert("_user_id".to_string(), user_id.clone());
+            }
+        }
+        if let Some(namespace) = doc.get("_namespace") {
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("_namespace".to_string(), namespace.clone());
             }
         }
     }
@@ -934,7 +942,7 @@ fn sort_expr(path: &str, allow_search_score: bool) -> AppResult<String> {
             "_search_score sort is only available when payload.search is used".to_string(),
         )),
         "id" | "_id" => Ok("id".to_string()),
-        "collection" | "_collection" => Ok("collection".to_string()),
+        "_namespace" => Ok("collection".to_string()),
         "_created_at" | "_modified_at" | "_expires_at" | "_size_bytes" | "_expiry_behavior"
         | "_txn_id" => Ok(path.to_string()),
         _ => {

@@ -16,7 +16,7 @@ const databaseSections = [
 ];
 
 export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed }) {
-  const { status, origin, settings, connections } = useAdmin();
+  const { status, origin, serviceInfo } = useAdmin();
   const [route, setRoute] = useState(() => parseCrudHash(window.location.hash));
 
   useEffect(() => {
@@ -38,33 +38,24 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
         </div>
         <nav className="flex flex-1 flex-col items-center gap-2 overflow-y-auto p-3">
           {stage === 'primary' ? (
-            <>
-              <CompactButton label="Home" text="H" active={page === 'home'} onClick={() => setPage('home')} />
-              <CompactButton label="Connection" text="C" active={page === 'settings'} onClick={() => setPage('settings')} />
-              <CompactButton label="System Metrics" text="SM" active={page === 'metrics'} onClick={() => setPage('metrics')} />
-              <CompactButton label="System Admin" text="SA" active={page === 'admin'} onClick={() => setPage('admin')} />
-            </>
+            <CompactButton label="Home" text="H" active={page === 'home'} onClick={() => setPage('home')} />
           ) : null}
           {stage === 'host' ? (
-            <>
-              <CompactButton label="Databases" text="D" active onClick={() => setPage('crud')} />
-              <CompactButton label="System Metrics" text="SM" onClick={() => setPage('metrics')} />
-              <CompactButton label="System Admin" text="SA" onClick={() => setPage('admin')} />
-              <CompactButton label="Connection Settings" text="C" onClick={() => setPage('settings')} />
-            </>
+            <CompactButton label="Databases" text="D" active onClick={() => setPage('crud')} />
           ) : null}
           {stage === 'database' ? (
             <>
               {databaseSections.map((item) => (
                 <CompactButton key={item.id} label={item.label} text={item.short} active={route.tab === item.id} onClick={() => openDbSection(route.db, item.id)} />
               ))}
-              <div className="my-1 h-px w-8 bg-white/10" />
-              <CompactButton label="System Metrics" text="SM" onClick={() => setPage('metrics')} />
-              <CompactButton label="System Admin" text="SA" onClick={() => setPage('admin')} />
             </>
           ) : null}
         </nav>
-        <div className="sidebar-border w-full border-t p-3"><div className={`mx-auto h-2.5 w-2.5 rounded-full ${statusDot(status.tone)}`} title={status.text} /></div>
+        <div className="sidebar-border flex w-full flex-col items-center gap-3 border-t p-3">
+          <a href={`${origin}/doc`} target="_blank" rel="noreferrer" className="text-[10px] font-semibold text-slate-400 hover:text-emerald-300" title="Open Kongo Docs">Docs</a>
+          <span className="font-mono text-[9px] text-slate-500" title={`Kongo ${formatVersion(serviceInfo?.version)}`}>{compactVersion(serviceInfo?.version)}</span>
+          <div className={`h-2.5 w-2.5 rounded-full ${statusDot(status.tone)}`} title={status.text} />
+        </div>
       </aside>
     );
   }
@@ -83,22 +74,11 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
         {stage === 'primary' ? (
           <p className="sidebar-muted mt-3 text-xs leading-5">Choose a connection to begin. No database is opened from this level.</p>
         ) : (
-          <div className="mt-4 space-y-2">
+          <div className="mt-3">
             <button type="button" onClick={() => goBack(stage)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white">
               <span aria-hidden="true">←</span>
               {stage === 'database' ? 'All Databases' : 'All Connections'}
             </button>
-            <div className="sidebar-card p-3">
-              <div className="sidebar-muted text-[10px] font-semibold uppercase tracking-[0.18em]">Connected Host</div>
-              <div className="mt-1 truncate text-sm font-semibold text-white">{settings.name || 'Connection'}</div>
-              <div className="mt-1 truncate font-mono text-[10px] text-slate-400" title={origin}>{hostLabel(origin)}</div>
-            </div>
-            {stage === 'database' ? (
-              <div className="sidebar-card p-3">
-                <div className="sidebar-muted text-[10px] font-semibold uppercase tracking-[0.18em]">Selected Database</div>
-                <div className="mt-1 break-all font-mono text-xs font-semibold text-emerald-300">{route.db}</div>
-              </div>
-            ) : null}
           </div>
         )}
       </div>
@@ -108,10 +88,6 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
           <div className="space-y-2">
             <div className="sidebar-section">Start</div>
             <SidebarItem title="Home" description="Welcome to Kongo" active={page === 'home'} onClick={() => setPage('home')} />
-            <SidebarItem title="Connection" description={connections.length ? `${connections.length} saved connection${connections.length === 1 ? '' : 's'}` : 'Add your first host'} active={page === 'settings'} onClick={() => setPage('settings')} />
-            <div className="sidebar-section mt-4">Instance</div>
-            <SidebarItem title="System Metrics" description="Uptime, traffic, memory, and queues" active={page === 'metrics'} onClick={() => setPage('metrics')} />
-            <SidebarItem title="System Admin" description="Instance tools and system catalog" active={page === 'admin'} onClick={() => setPage('admin')} />
           </div>
         ) : null}
 
@@ -119,9 +95,6 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
           <div className="space-y-2">
             <div className="sidebar-section">Host</div>
             <SidebarItem title="Databases" description="Browse and select a database" active onClick={() => setPage('crud')} />
-            <SidebarItem title="System Metrics" description="Uptime, traffic, memory, and queues" onClick={() => setPage('metrics')} />
-            <SidebarItem title="System Admin" description="Instance tools and system catalog" onClick={() => setPage('admin')} />
-            <SidebarItem title="Connection" description="Edit or test this host" onClick={() => setPage('settings')} />
           </div>
         ) : null}
 
@@ -131,15 +104,17 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
             {databaseSections.map((item) => (
               <SidebarItem compact key={item.id} title={item.label} description={item.description} active={route.tab === item.id} onClick={() => openDbSection(route.db, item.id)} />
             ))}
-            <div className="sidebar-section mb-1 mt-4">Instance</div>
-            <SidebarItem compact title="System Metrics" description="Uptime, traffic, memory, and queues" onClick={() => setPage('metrics')} />
-            <SidebarItem compact title="System Admin" description="Instance tools and system catalog" onClick={() => setPage('admin')} />
           </div>
         ) : null}
       </nav>
 
       <div className="border-t border-white/10 p-4">
-        <div className="flex items-center justify-between text-xs"><span className="text-slate-400">Status</span><span className={statusTone(status.tone)}>{status.text}</span></div>
+        <a href={`${origin}/doc`} target="_blank" rel="noreferrer" className="flex items-center justify-between rounded-lg px-2 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white">
+          <span>Kongo Docs</span>
+          <span aria-hidden="true">↗</span>
+        </a>
+        <div className="mt-2 flex items-center justify-between px-2 text-[11px]"><span className="text-slate-500">Version</span><span className="font-mono text-slate-300">{formatVersion(serviceInfo?.version)}</span></div>
+        <div className="mt-2 flex items-center justify-between px-2 text-xs"><span className="text-slate-400">Status</span><span className={statusTone(status.tone)}>{status.text}</span></div>
       </div>
     </aside>
   );
@@ -172,14 +147,6 @@ function openDbSection(db, section) {
   window.location.hash = `#crud/db/${encodeDbForHash(db)}/${section}`;
 }
 
-function hostLabel(origin) {
-  try {
-    return new URL(origin).host;
-  } catch (_) {
-    return origin;
-  }
-}
-
 function statusTone(tone) {
   if (tone === 'ready') return 'font-semibold text-emerald-300';
   if (tone === 'error') return 'font-semibold text-red-300';
@@ -192,6 +159,14 @@ function statusDot(tone) {
   if (tone === 'error') return 'bg-red-300';
   if (tone === 'working') return 'bg-amber-300';
   return 'bg-slate-500';
+}
+
+function formatVersion(version) {
+  return version ? `v${String(version).replace(/^v/, '')}` : 'Not connected';
+}
+
+function compactVersion(version) {
+  return version ? `v${String(version).replace(/^v/, '')}` : 'v—';
 }
 
 function parseCrudHash(hash) {

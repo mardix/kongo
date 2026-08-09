@@ -35,6 +35,7 @@ export function AdminProvider({ children }) {
   const [status, setStatus] = useState({ text: 'Idle', tone: 'idle' });
   const [toast, setToast] = useState(null);
   const [connectionError, setConnectionError] = useState('');
+  const [serviceInfo, setServiceInfo] = useState(null);
   const [activeNamespaces, setActiveNamespaces] = useState([]);
   const [namespaceIntent, setNamespaceIntent] = useState(null);
 
@@ -63,6 +64,7 @@ export function AdminProvider({ children }) {
       persist(next);
       return next;
     });
+    if (id === activeConnectionId) setServiceInfo(null);
   }
 
   function saveSettings() {
@@ -77,9 +79,10 @@ export function AdminProvider({ children }) {
     localStorage.setItem(ACTIVE_CONNECTION_KEY, id);
     setActiveNamespaces([]);
     setNamespaceIntent(null);
+    setServiceInfo(null);
     setStatus({ text: 'Idle', tone: 'idle' });
     showToast('Connection switched');
-    return testConnection(target.settings, { silentSuccess: true });
+    return testConnection(target.settings, { silentSuccess: true, captureServiceInfo: true });
   }
 
   function createConnection(seed = {}) {
@@ -99,6 +102,7 @@ export function AdminProvider({ children }) {
     persist(next, id);
     setActiveNamespaces([]);
     setNamespaceIntent(null);
+    setServiceInfo(null);
     showToast('Connection created');
   }
 
@@ -121,6 +125,7 @@ export function AdminProvider({ children }) {
     persist(next, nextActive);
     setActiveNamespaces([]);
     setNamespaceIntent(null);
+    if (activeConnectionId === id) setServiceInfo(null);
     showToast('Connection deleted');
   }
 
@@ -148,13 +153,14 @@ export function AdminProvider({ children }) {
   }
 
   async function ping() {
-    return testConnection(settings);
+    return testConnection(settings, { captureServiceInfo: true });
   }
 
   async function testConnection(targetSettings = settings, opts = {}) {
     return runStatusCall(async () => {
       try {
         const data = await pingRequest(targetSettings);
+        if (opts.captureServiceInfo) setServiceInfo(data);
         setConnectionError('');
         if (!opts.silentSuccess) showToast(`Ping: ${data.status || 'ok'}`);
         return data;
@@ -168,6 +174,19 @@ export function AdminProvider({ children }) {
 
   function openDocs() {
     window.open(`${origin}/doc`, '_blank', 'noopener,noreferrer');
+  }
+
+  function clearLocalData() {
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith('kongodb-') || key.startsWith('kongodb:'))
+      .forEach((key) => localStorage.removeItem(key));
+    setConnections([]);
+    setActiveConnectionId('');
+    setServiceInfo(null);
+    setConnectionError('');
+    setActiveNamespaces([]);
+    setNamespaceIntent(null);
+    setStatus({ text: 'Idle', tone: 'idle' });
   }
 
   function requestNamespaceSelection(db, namespace) {
@@ -198,6 +217,8 @@ export function AdminProvider({ children }) {
     ping,
     testConnection,
     openDocs,
+    serviceInfo,
+    clearLocalData,
     activeNamespaces,
     setActiveNamespaces,
     namespaceIntent,

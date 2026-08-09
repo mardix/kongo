@@ -5,15 +5,13 @@
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
   --color-primary: var(--color-sky-900);
   --color-secondary: var(--color-slate-950);
-  --color-neutral: var(--color-slate-600);
+  --color-neutral: var(--color-slate-700);
   --color-danger: var(--color-rose-700);
   --color-warning: var(--color-amber-300);
   --color-surface: var(--color-white);
   --color-canvas: var(--color-slate-100);
-  --color-ink: var(--color-slate-950);
-  --color-muted: var(--color-slate-500);
-  --shadow-soft: 0 24px 80px rgba(16,32,28,.14);
-  --shadow-ringed: 0 0 0 1px rgba(16,32,28,.08), 0 18px 50px rgba(16,32,28,.12);
+  --color-ink: var(--color-slate-700);
+  --color-muted: var(--color-slate-600);
 }
 
 @layer base {
@@ -23,6 +21,24 @@
 
   button {
     @apply disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  button:not(:disabled),
+  a[href],
+  select:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled),
+  input[type="file"]:not(:disabled),
+  label[for],
+  summary,
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+
+  main input::placeholder,
+  main textarea::placeholder {
+    color: var(--color-slate-500);
+    opacity: 1;
   }
 }
 
@@ -61,11 +77,11 @@
     @apply rounded-lg border border-slate-300 bg-primary px-3 py-2 text-xs font-semibold text-surface outline-none hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50
   }
   .sidebar-shell {
-    @apply fixed inset-y-0 left-0 z-40 flex h-screen w-72 flex-col border-r border-slate-200 bg-slate-950 text-white shadow-2xl lg:static lg:h-full lg:shadow-none;
+    @apply fixed inset-y-0 left-0 z-40 flex h-screen w-72 flex-col border-r border-slate-200 bg-slate-950 text-white lg:static lg:h-full;
   }
 
   .sidebar-shell-collapsed {
-    @apply static h-full w-[4.5rem] shadow-none;
+    @apply static h-full w-[4.5rem];
   }
 
   .sidebar-shell button:not(:disabled) {
@@ -237,7 +253,7 @@
   }
 
   .json-node {
-    @apply rounded-lg border border-slate-200 bg-white shadow-sm;
+    @apply rounded-lg border border-slate-200 bg-white;
   }
 
   .json-node-locked {
@@ -397,7 +413,7 @@
   }
 
   .document-tree-node {
-    @apply overflow-hidden rounded-lg border shadow-sm;
+    @apply overflow-hidden rounded-lg border;
   }
 
   .document-tree-row {
@@ -435,4 +451,88 @@
   .document-tree-empty {
     @apply rounded-lg border border-dashed border-slate-300 bg-white/70 px-4 py-3 text-center text-xs italic text-slate-500;
   }
+}
+
+/* Keep dense admin content readable without changing the dark sidebar palette. */
+main .text-slate-500 {
+  color: var(--color-slate-600);
+}
+
+main .text-slate-400 {
+  color: var(--color-slate-600);
+}
+
+main .bg-slate-950.text-slate-400,
+main .bg-slate-950 .text-slate-400,
+main .bg-slate-900.text-slate-400,
+main .bg-slate-900 .text-slate-400 {
+  color: var(--color-slate-400);
+}
+
+main .bg-slate-950.text-slate-500,
+main .bg-slate-950 .text-slate-500,
+main .bg-slate-900.text-slate-500,
+main .bg-slate-900 .text-slate-500 {
+  color: var(--color-slate-300);
+}
+
+main .font-medium {
+  font-weight: 600;
+}
+
+main .font-semibold {
+  font-weight: 700;
+}
+
+main .text-sm {
+  font-size: 0.9375rem;
+  line-height: 1.375rem;
+}
+
+main .text-xs {
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
+}
+
+main .text-\[10px\] {
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+main .text-\[11px\] {
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
+}
+
+main p.text-slate-400,
+main p.text-slate-500,
+main p.text-slate-600,
+main p.text-neutral {
+  font-weight: 500;
+}
+
+main .panel-header h2,
+main .panel-header h3,
+main .panel-header h4,
+main .panel-header-row h2,
+main .panel-header-row h3,
+main .panel-header-row h4 {
+  color: var(--color-slate-950);
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.5rem;
+}
+
+main .panel-header p,
+main .panel-header-row p {
+  color: var(--color-slate-600);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+
+main .field-label,
+main .data-grid-head {
+  color: var(--color-slate-700);
+  font-weight: 700;
 }

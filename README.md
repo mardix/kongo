@@ -186,8 +186,7 @@ Open the Admin UI at `http://localhost:8080/_/kdb/admin/` (username `kongo`, pas
 {
   "db": "myapp/main",
   "operation": "query",
-  "namespace": "users",
-  "namespaces": ["users", "admins"],
+  "namespace": ["users", "admins"],
   "payload": {}
 }
 ```
@@ -195,16 +194,15 @@ Open the Admin UI at `http://localhost:8080/_/kdb/admin/` (username `kongo`, pas
 ### The rules of the road
 
 - `db` is required everywhere except global, db-list-style operations.
-- `namespace` is the canonical selector. `collection` is just an alias (top-level, and `payload.collection`).
-- `namespace` and `namespaces` are mutually exclusive.
-- Shorthand alias works too: `"operation": "query::users"` → `operation=query`, `namespace=users`. Same for `query::*` and `query::users,admins,teams`. Shorthand can't be mixed with a top-level `namespace`/`namespaces`.
+- `namespace` is the only public selector. Use a string for one namespace or an array for several.
+- Shorthand alias works too: `"operation": "query::users"` → `operation=query`, `namespace=users`. Same for `query::*` and `query::users,admins,teams`. Shorthand can't be mixed with top-level `namespace`.
 - Namespace requirements by operation type:
   - **Required:** `insert`, `query`
-  - **Insert-family:** must be a single concrete namespace — no `*`, no `namespaces[]`
+  - **Insert-family:** must be a single concrete namespace — no `*` or array
   - **ID-targeted writes** (`update`, `delete`): namespace optional, strict if given
   - **Global ID reads:** `query` with `namespace="*"` and `_id`/`_id.$in` in `filter`
   - **Filter/wide ops:** namespace required unless `scope=all` is explicitly supported and set
-- `namespace: "*"` is shorthand for `payload.scope: "all"` (conflicts with `payload.scope: "collection"`).
+- `namespace: "*"` is shorthand for `payload.scope: "all"` (conflicts with `payload.scope: "namespace"`).
 - Only three operations can create a brand-new db: `create_db`, `insert`, `import_jsonl`.
 
 ### Success response
@@ -258,8 +256,8 @@ The bread and butter — documents in, documents out.
 | `update` | `data(with _id)` or `filter + data` or `data(array)` | Patch one doc, many by filter, or many by explicit ids. `replace=true` only works single-doc. |
 | `upsert` | `namespace`, `filter`, `insert_data` | Update on match, insert on miss; exact `_id` filters preserve that id. |
 | `count` | — | Count matches, filter optional. |
-| `query` | `namespace`/`namespaces`/`*` | Filter, sort, paginate, project, lookup, per-row compute, or FTS with `payload.search`. |
-| `multi_query` | `payload.queries[]` | Run several aliased, independent document queries against one database in one read-only request. |
+| `query` | `namespace` string/array/`*` | Filter, sort, paginate, project, lookup, per-row compute, or FTS with `payload.search`. |
+| `multi_query` | `payload.operations[]` | Run several aliased, independent document queries against one database in one read-only request. |
 | `aggregate` | `compute` | Set-level metrics: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$distinct`. |
 | `delete` | one of `id` / `ids` / `filter` | Soft-delete to archive by default; `purge=true` hard-deletes. |
 | `set_ttl` | `ids`/`filter` + `ttl_seconds` | Set or reset a document's TTL. |
@@ -781,8 +779,8 @@ The escape hatch when document operations and Filter Operators are not enough. `
   "db": "myapp/main",
   "operation": "sql_execute",
   "payload": {
-    "sql": "SELECT collection, COUNT(*) AS total FROM __kdb_documents WHERE collection = ? GROUP BY collection",
-    "params": ["users"]
+    "sql": "SELECT id, email FROM users ORDER BY id LIMIT 25",
+    "params": []
   }
 }
 ```
@@ -878,11 +876,13 @@ Full-text search is a `query` mode over live documents, powered by SQLite FTS5. 
 
 ### Transaction
 
-Run multiple write operations atomically, as a single unit.
+Run multiple insert, update, upsert, and delete operations inside one SQL transaction. The default is atomic all-or-nothing execution, with an explicit partial continuation mode when needed.
+
+`payload.on_error` defaults to `fail`, which rolls back the entire transaction on the first child error. Set it to `continue` for savepoint-isolated children: failed operations are rolled back individually, successful operations commit together, and the response is `partial`. Nested inserts default `on_conflict` to `error`; use `on_conflict:"skip"` explicitly for an expected uniqueness no-op.
 
 | Op | Needs | What it does |
 |---|---|---|
-| `transaction` | `data[]` (array of ops) | Run `insert`/`update`/`delete` atomically. Nested inserts support `unique_fields` and `on_conflict`. |
+| `transaction` | `payload.operations[]` | Run `insert`/`update`/`upsert`/`delete` in one SQL transaction, with fail-fast atomicity or savepoint-isolated continuation. |
 
 **`transaction`**:
 
@@ -890,30 +890,45 @@ Run multiple write operations atomically, as a single unit.
 {
   "db": "myapp/main",
   "operation": "transaction",
-  "data": [
-    {
-      "operation": "insert",
-      "namespace": "users",
-      "payload": {
-        "data": {
-          "_id": "u1",
-          "name": "Ada"
+  "payload": {
+    "operations": [
+      {
+        "operation": "insert",
+        "namespace": "users",
+        "payload": {
+          "data": {
+            "_id": "u1",
+            "name": "Ada"
+          }
+        }
+      },
+      {
+        "operation": "update",
+        "namespace": "users",
+        "payload": {
+          "data": {
+            "_id": "u1",
+            "plan": "pro"
+          }
+        }
+      },
+      {
+        "alias": "ensure-profile",
+        "operation": "upsert",
+        "namespace": "profiles",
+        "payload": {
+          "filter": {"user_id": "u1"},
+          "insert_data": {"user_id": "u1", "visits": 1},
+          "update_data": {"visits": {"$inc": 1}},
+          "max_docs": 1
         }
       }
-    },
-    {
-      "operation": "update",
-      "namespace": "users",
-      "payload": {
-        "data": {
-          "_id": "u1",
-          "plan": "pro"
-        }
-      }
-    }
-  ]
+    ]
+  }
 }
 ```
+
+Nested upserts see earlier writes in the same transaction. Their result entry includes `data.action` (`inserted`, `updated`, or `no_change`) and the affected documents/counts.
 
 ---
 
@@ -1252,7 +1267,7 @@ The most commonly used fields across operations:
 | `fields` / `exclude_fields` | string[] | Projection |
 | `compute` | object | Aggregate/per-row derived values |
 | `lookups` | object | Join map |
-| `scope` | string | `collection` (default) or `all` |
+| `scope` | string | `namespace` (default) or `all` |
 | `include_archive` / `archive_only` | bool | Read source control |
 | `cache` | bool/int | `false/0` bypass, `true/1` default TTL, `N` custom TTL, `-1` invalidate |
 | `dry_run` | bool | Simulate without writing |

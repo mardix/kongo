@@ -82,35 +82,35 @@ for _ in $(seq 1 40); do
 done
 
 echo "[3/9] seed collections"
-curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","payload":{"collection":"users","data":[{"_id":"u1","name":"User1","book_ids":["b1","b2"]}]}}' >/dev/null
-curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","payload":{"collection":"books","data":[{"_id":"b1","name":"Book1"},{"_id":"b2","name":"Book2"}]}}' >/dev/null
-curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","payload":{"collection":"n1","data":[{"_id":"a1","next":"x1"}]}}' >/dev/null
-curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","payload":{"collection":"n2","data":[{"_id":"x1","next":"y1"}]}}' >/dev/null
-curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","payload":{"collection":"n3","data":[{"_id":"y1","next":"z1"}]}}' >/dev/null
-curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","payload":{"collection":"n4","data":[{"_id":"z1","name":"N4"}]}}' >/dev/null
+curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","namespace":"users","payload":{"data":[{"_id":"u1","name":"User1","book_ids":["b1","b2"]}]}}' >/dev/null
+curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","namespace":"books","payload":{"data":[{"_id":"b1","name":"Book1"},{"_id":"b2","name":"Book2"}]}}' >/dev/null
+curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","namespace":"n1","payload":{"data":[{"_id":"a1","next":"x1"}]}}' >/dev/null
+curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","namespace":"n2","payload":{"data":[{"_id":"x1","next":"y1"}]}}' >/dev/null
+curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","namespace":"n3","payload":{"data":[{"_id":"y1","next":"z1"}]}}' >/dev/null
+curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"insert","namespace":"n4","payload":{"data":[{"_id":"z1","name":"N4"}]}}' >/dev/null
 
 echo "[4/9] unknown alias reference rejected"
-BAD_ALIAS="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","payload":{"collection":"users","lookups":{"vendors":{"from":"books","local_field":"$lookup.missing[].id","foreign_field":"_id","match":"$in","multi":true,"limit":10}}}}')"
+BAD_ALIAS="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","namespace":"users","payload":{"lookups":{"vendors":{"from":"books","local_field":"$lookup.missing[].id","foreign_field":"_id","match":"$in","multi":true,"limit":10}}}}')"
 assert_contains "$BAD_ALIAS" '"status":"error"' "unknown alias reference should fail"
 assert_contains "$BAD_ALIAS" 'unknown alias' "unknown alias message should be present"
 
 echo "[5/9] cycle detection rejected"
-CYCLE="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","payload":{"collection":"users","lookups":{"a":{"from":"books","local_field":"$lookup.b._id","foreign_field":"_id","match":"$eq"},"b":{"from":"books","local_field":"$lookup.a._id","foreign_field":"_id","match":"$eq"}}}}')"
+CYCLE="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","namespace":"users","payload":{"lookups":{"a":{"from":"books","local_field":"$lookup.b._id","foreign_field":"_id","match":"$eq"},"b":{"from":"books","local_field":"$lookup.a._id","foreign_field":"_id","match":"$eq"}}}}')"
 assert_contains "$CYCLE" '"status":"error"' "cycle should fail"
 assert_contains "$CYCLE" 'cycle' "cycle message should be present"
 
 echo "[6/9] strict_path and on_missing behavior"
-STRICT_FAIL="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","payload":{"collection":"users","lookups":{"books":{"from":"books","local_field":"missing.path","foreign_field":"_id","match":"$eq","strict_path":true}}}}')"
+STRICT_FAIL="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","namespace":"users","payload":{"lookups":{"books":{"from":"books","local_field":"missing.path","foreign_field":"_id","match":"$eq","strict_path":true}}}}')"
 assert_contains "$STRICT_FAIL" '"status":"error"' "strict_path should fail on missing path"
 
-ON_MISSING_EMPTY="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","payload":{"collection":"users","lookups":{"none_books":{"from":"books","local_field":"missing[]","foreign_field":"_id","match":"$in","multi":true,"limit":5,"on_missing":"empty"}}}}')"
+ON_MISSING_EMPTY="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","namespace":"users","payload":{"lookups":{"none_books":{"from":"books","local_field":"missing[]","foreign_field":"_id","match":"$in","multi":true,"limit":5,"on_missing":"empty"}}}}')"
 assert_contains "$ON_MISSING_EMPTY" '"none_books":[]' "on_missing=empty should return empty array"
 
-ON_MISSING_DROP="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","payload":{"collection":"users","lookups":{"none_books":{"from":"books","local_field":"missing[]","foreign_field":"_id","match":"$in","multi":true,"limit":5,"on_missing":"drop"}}}}')"
+ON_MISSING_DROP="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","namespace":"users","payload":{"lookups":{"none_books":{"from":"books","local_field":"missing[]","foreign_field":"_id","match":"$in","multi":true,"limit":5,"on_missing":"drop"}}}}')"
 assert_contains "$ON_MISSING_DROP" '"count":0' "on_missing=drop should remove parent rows"
 
 echo "[7/9] depth cap and uncapped override"
-DEPTH_FAIL="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","payload":{"collection":"n1","lookup_depth_override":4,"lookups":{"l2":{"from":"n2","local_field":"next","foreign_field":"_id","match":"$eq","lookups":{"l3":{"from":"n3","local_field":"next","foreign_field":"_id","match":"$eq","lookups":{"l4":{"from":"n4","local_field":"next","foreign_field":"_id","match":"$eq"}}}}}}}}')"
+DEPTH_FAIL="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","namespace":"n1","payload":{"lookup_depth_override":4,"lookups":{"l2":{"from":"n2","local_field":"next","foreign_field":"_id","match":"$eq","lookups":{"l3":{"from":"n3","local_field":"next","foreign_field":"_id","match":"$eq","lookups":{"l4":{"from":"n4","local_field":"next","foreign_field":"_id","match":"$eq"}}}}}}}}')"
 assert_contains "$DEPTH_FAIL" '"status":"error"' "depth override over cap should fail when uncapped disabled"
 assert_contains "$DEPTH_FAIL" 'exceeds max depth' "depth cap message should be present"
 
@@ -131,12 +131,12 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 
-DEPTH_OK="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","payload":{"collection":"n1","lookup_depth_override":4,"lookups":{"l2":{"from":"n2","local_field":"next","foreign_field":"_id","match":"$eq","lookups":{"l3":{"from":"n3","local_field":"next","foreign_field":"_id","match":"$eq","lookups":{"l4":{"from":"n4","local_field":"next","foreign_field":"_id","match":"$eq","fields":["_id","name"]}}}}}}}}')"
+DEPTH_OK="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","namespace":"n1","payload":{"lookup_depth_override":4,"lookups":{"l2":{"from":"n2","local_field":"next","foreign_field":"_id","match":"$eq","lookups":{"l3":{"from":"n3","local_field":"next","foreign_field":"_id","match":"$eq","lookups":{"l4":{"from":"n4","local_field":"next","foreign_field":"_id","match":"$eq","fields":["_id","name"]}}}}}}}}')"
 assert_contains "$DEPTH_OK" '"status":"success"' "uncapped override should allow deeper lookup"
 assert_contains "$DEPTH_OK" '"l4"' "deep nested alias should be present"
 
 echo "[8/9] query supports lookups + fields + exclude_fields"
-GET_LOOKUP_PROJ="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","payload":{"collection":"users","filter":{"_id":"u1"},"lookups":{"books":{"from":"books","local_field":"book_ids[]","foreign_field":"_id","match":"$in","multi":true,"limit":10,"fields":["_id","name","vendor_id"]},"vendors":{"from":"books","local_field":"$lookup.books[].vendor_id","foreign_field":"_id","match":"$in","multi":true,"limit":10,"fields":["_id","name"]}},"fields":["name","books","vendors"],"exclude_fields":["books.vendor_id"]}}')"
+GET_LOOKUP_PROJ="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"lkp","operation":"query","namespace":"users","payload":{"filter":{"_id":"u1"},"lookups":{"books":{"from":"books","local_field":"book_ids[]","foreign_field":"_id","match":"$in","multi":true,"limit":10,"fields":["_id","name","vendor_id"]},"vendors":{"from":"books","local_field":"$lookup.books[].vendor_id","foreign_field":"_id","match":"$in","multi":true,"limit":10,"fields":["_id","name"]}},"fields":["name","books","vendors"],"exclude_fields":["books.vendor_id"]}}')"
 assert_contains "$GET_LOOKUP_PROJ" '"status":"success"' "query lookup+projection should succeed"
 assert_contains "$GET_LOOKUP_PROJ" '"books":' "query should include books lookup"
 assert_contains "$GET_LOOKUP_PROJ" '"vendors":' "query should include sibling lookup"

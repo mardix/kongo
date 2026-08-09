@@ -45,7 +45,7 @@ async fn delete(
             .append_wal_record(
                 db_path,
                 "DELETE_PURGE",
-                &json!({"collection": collection, "count": deleted, "purge": true}).to_string(),
+                &json!({"namespace": collection, "count": deleted, "purge": true}).to_string(),
             )
             .await?;
         return Ok(GatewayResponse::ok(Some(json!({
@@ -64,7 +64,7 @@ async fn delete(
         .append_wal_record(
             db_path,
             "DELETE",
-            &json!({"collection": collection, "count": result.deleted_count, "_txn_id": result.txn_id, "__kdb_archive_ttl_seconds": common.__kdb_archive_ttl}).to_string(),
+            &json!({"namespace": collection, "count": result.deleted_count, "_txn_id": result.txn_id, "__kdb_archive_ttl_seconds": common.__kdb_archive_ttl}).to_string(),
         )
         .await?;
 
@@ -99,7 +99,7 @@ async fn drop_collection(
 
     if dry_run {
         return Ok(GatewayResponse::ok(Some(json!({
-            "collection": collection,
+            "namespace": collection,
             "count": ids.len(),
             "deleted_count": ids.len(),
             "purge": hard_delete,
@@ -114,11 +114,11 @@ async fn drop_collection(
             .append_wal_record(
                 db_path,
                 "DROP_COLLECTION_PURGE",
-                &json!({"collection": collection, "deleted_count": deleted}).to_string(),
+                &json!({"namespace": collection, "deleted_count": deleted}).to_string(),
             )
             .await?;
         return Ok(GatewayResponse::ok(Some(json!({
-            "collection": collection,
+            "namespace": collection,
             "deleted_count": deleted,
             "purge": true
         }))));
@@ -131,19 +131,19 @@ async fn drop_collection(
         .append_wal_record(
             db_path,
             "DROP_COLLECTION",
-            &json!({"collection": collection, "count": result.deleted_count, "_txn_id": result.txn_id, "__kdb_archive_ttl_seconds": __kdb_archive_ttl}).to_string(),
+            &json!({"namespace": collection, "count": result.deleted_count, "_txn_id": result.txn_id, "__kdb_archive_ttl_seconds": __kdb_archive_ttl}).to_string(),
         )
         .await?;
 
     Ok(GatewayResponse {
         status: "success",
         data: Some(json!({
-            "collection": collection,
+            "namespace": collection,
             "deleted_count": result.deleted_count,
             "purge": false
         })),
         txn_id: Some(result.txn_id),
-        message: Some("dropped_collection".to_string()),
+        message: Some("dropped_namespace".to_string()),
         ack_mode: None,
         ack_status: None,
         committed: None,
@@ -275,7 +275,7 @@ async fn restore_kdb_archive(
                 .get(0)
                 .map_err(|e| AppError::Internal(format!("restore id decode failed: {e}")))?,
             collection: row.get(1).map_err(|e| {
-                AppError::Internal(format!("restore collection decode failed: {e}"))
+                AppError::Internal(format!("restore namespace decode failed: {e}"))
             })?,
             user_id: row
                 .get(2)

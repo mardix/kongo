@@ -281,7 +281,7 @@ async fn insert(
         .append_wal_record(
             db_path,
             "INSERT",
-            &json!({"collection": collection, "count": kept_ids.len()}).to_string(),
+            &json!({"namespace": collection, "count": kept_ids.len()}).to_string(),
         )
         .await?;
 
@@ -567,7 +567,7 @@ async fn upsert(
 ) -> AppResult<GatewayResponse> {
     let lifecycle_specs = parse_document_lifecycle(req.payload.lifecycle.take())?;
     if lifecycle_specs.is_empty() {
-        return upsert_inner(state, db_path, conn, req).await;
+        return upsert_inner(state, Some(db_path), conn, req).await;
     }
     if req.payload.max_docs.unwrap_or(1) != 1 {
         return Err(AppError::BadRequest(
@@ -575,7 +575,7 @@ async fn upsert(
         ));
     }
     if req.payload.dry_run.unwrap_or(false) {
-        let mut response = upsert_inner(state, db_path, conn, req).await?;
+        let mut response = upsert_inner(state, Some(db_path), conn, req).await?;
         add_lifecycle_dry_run_response(&mut response, &lifecycle_specs);
         return Ok(response);
     }
@@ -583,7 +583,7 @@ async fn upsert(
         .await
         .map_err(|e| AppError::Internal(format!("upsert lifecycle tx begin failed: {e}")))?;
     let result = async {
-        let mut response = upsert_inner(state, db_path, conn, req).await?;
+        let mut response = upsert_inner(state, Some(db_path), conn, req).await?;
         let document_id = response
             .data
             .as_ref()
@@ -628,7 +628,7 @@ async fn upsert(
 
 async fn upsert_inner(
     state: &AppState,
-    db_path: &str,
+    wal_db_path: Option<&str>,
     conn: &libsql::Connection,
     req: GatewayRequest,
 ) -> AppResult<GatewayResponse> {
@@ -762,7 +762,7 @@ async fn upsert_inner(
         .ok_or_else(|| AppError::Internal("generated _id missing".to_string()))?;
 
     let insert_collection = collection.clone().ok_or_else(|| {
-        AppError::BadRequest("collection is required for upsert insert path".to_string())
+        AppError::BadRequest("namespace is required for upsert insert path".to_string())
     })?;
 
     let data_expr = json_input_expr(state.jsonb_enabled);
@@ -783,14 +783,16 @@ async fn upsert_inner(
     .await
     .map_err(|e| AppError::Conflict(format!("upsert insert failed: {e}")))?;
 
-    state
-        .db_manager
-        .append_wal_record(
-            db_path,
-            "UPSERT_INSERT",
-            &json!({"collection": insert_collection, "id": new_id}).to_string(),
-        )
-        .await?;
+    if let Some(db_path) = wal_db_path {
+        state
+            .db_manager
+            .append_wal_record(
+                db_path,
+                "UPSERT_INSERT",
+                &json!({"namespace": insert_collection, "id": new_id}).to_string(),
+            )
+            .await?;
+    }
 
     let new_id_owned = new_id.to_string();
     let items = fetch_kdb_documents_by_ids(

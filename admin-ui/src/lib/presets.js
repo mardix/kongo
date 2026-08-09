@@ -6,14 +6,38 @@ export const metricSample = [
 ];
 
 export function crudPreset(kind, db, namespace) {
+  const selectedNamespace = String(namespace || '');
   const presets = {
-    query: { db, operation: 'query', namespace, payload: { filter: {}, sort: '_created_at desc', limit: 25, attach_users: false, attach_user_fields: ['id', 'first_name', 'last_name', 'profile_photo'] } },
-    insert: { db, operation: 'insert', namespace, payload: { _user_id: '', data: { name: 'Ada Lovelace', email: 'ada@example.com' } } },
-    update: { db, operation: 'update', namespace, payload: { data: { _id: 'paste-id-here', score: { $inc: 1 } } } },
-    delete: { db, operation: 'delete', namespace, payload: { id: 'paste-id-here' } },
-    count: { db, operation: 'count', namespace, payload: { filter: {} } },
-    aggregate: { db, operation: 'aggregate', namespace, payload: { filter: {}, compute: { total: { $count: '*' } } } },
-    search: { db, operation: 'query', namespace, payload: { search: 'ada', limit: 25 } }
+    query: { db, operation: 'query', namespace: selectedNamespace, payload: { filter: {}, sort: '_created_at desc', limit: 25, attach_users: false, attach_user_fields: ['id', 'first_name', 'last_name', 'profile_photo'] } },
+    multi_query: {
+      db,
+      operation: 'multi_query',
+      payload: {
+        on_error: 'fail',
+        operations: [
+          { alias: 'recent', namespace: selectedNamespace, payload: { filter: {}, sort: '_created_at desc', limit: 10 } },
+          { alias: 'counted', namespace: selectedNamespace, payload: { filter: {}, fields: ['_id'], limit: 25 } }
+        ]
+      }
+    },
+    insert: { db, operation: 'insert', namespace: selectedNamespace, payload: { _user_id: '', data: { name: 'Ada Lovelace', email: 'ada@example.com' } } },
+    update: { db, operation: 'update', namespace: selectedNamespace, payload: { data: { _id: 'paste-id-here', score: { $inc: 1 } } } },
+    upsert: { db, operation: 'upsert', namespace: selectedNamespace, payload: { filter: { email: 'ada@example.com' }, insert_data: { email: 'ada@example.com', visits: 1 }, update_data: { visits: { $inc: 1 } }, max_docs: 1 } },
+    delete: { db, operation: 'delete', namespace: selectedNamespace, payload: { id: 'paste-id-here' } },
+    count: { db, operation: 'count', namespace: selectedNamespace, payload: { filter: {} } },
+    aggregate: { db, operation: 'aggregate', namespace: selectedNamespace, payload: { filter: {}, compute: { total: { $count: '*' } } } },
+    transaction: {
+      db,
+      operation: 'transaction',
+      payload: {
+        on_error: 'fail',
+        operations: [
+          { alias: 'create-user', operation: 'insert', namespace: selectedNamespace, payload: { data: { email: 'ada@example.com', visits: 1 } } },
+          { alias: 'ensure-user', operation: 'upsert', namespace: selectedNamespace, payload: { filter: { email: 'ada@example.com' }, insert_data: { email: 'ada@example.com', visits: 1 }, update_data: { visits: { $inc: 1 } }, max_docs: 1 } }
+        ]
+      }
+    },
+    search: { db, operation: 'query', namespace: selectedNamespace, payload: { search: 'ada', limit: 25 } }
   };
   return presets[kind] || presets.query;
 }

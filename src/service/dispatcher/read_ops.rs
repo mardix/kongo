@@ -456,13 +456,13 @@ async fn multi_query_inner(
                     "data": data
                 }));
             }
-            Err(error) if on_error == MultiQueryOnError::Fail => return Err(error),
+            Err(error) if on_error == BatchOnError::Fail => return Err(error),
             Err(error) => {
                 failed += 1;
                 results.push(json!({
                     "alias": query.alias,
                     "status": "error",
-                    "error": multi_query_error_value(error)
+                    "error": batch_error_value(error)
                 }));
             }
         }
@@ -481,9 +481,23 @@ async fn multi_query_inner(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MultiQueryOnError {
+enum BatchOnError {
     Fail,
     Continue,
+}
+
+fn parse_batch_on_error(value: Option<&str>, operation: &str) -> AppResult<BatchOnError> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("fail")
+    {
+        "fail" => Ok(BatchOnError::Fail),
+        "continue" => Ok(BatchOnError::Continue),
+        other => Err(AppError::BadRequest(format!(
+            "{operation} on_error must be fail|continue, got: {other}"
+        ))),
+    }
 }
 
 #[derive(Debug)]
@@ -495,48 +509,39 @@ struct PreparedMultiQuery {
 fn prepare_multi_queries(
     payload: OperationPayload,
     max_queries: usize,
-) -> AppResult<(MultiQueryOnError, Vec<PreparedMultiQuery>)> {
+) -> AppResult<(BatchOnError, Vec<PreparedMultiQuery>)> {
     if payload.collection.is_some() || payload.namespaces.is_some() {
         return Err(AppError::BadRequest(
-            "multi_query namespace selectors belong on each queries[] item".to_string(),
+            "multi_query namespace selectors belong on each operations[] item".to_string(),
         ));
     }
-    let on_error = match payload
-        .on_error
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("fail")
-    {
-        "fail" => MultiQueryOnError::Fail,
-        "continue" => MultiQueryOnError::Continue,
-        other => {
-            return Err(AppError::BadRequest(format!(
-                "multi_query on_error must be fail|continue, got: {other}"
-            )));
-        }
-    };
-    let queries = payload
-        .queries
-        .ok_or_else(|| AppError::BadRequest("multi_query queries is required".to_string()))?;
-    if queries.is_empty() {
+    let on_error = parse_batch_on_error(payload.on_error.as_deref(), "multi_query")?;
+    let operations = payload
+        .operations
+        .ok_or_else(|| AppError::BadRequest("multi_query operations is required".to_string()))?;
+    if operations.is_empty() {
         return Err(AppError::BadRequest(
-            "multi_query queries must contain at least one item".to_string(),
+            "multi_query operations must contain at least one item".to_string(),
         ));
     }
-    if queries.len() > max_queries {
+    if operations.len() > max_queries {
         return Err(AppError::BadRequest(format!(
-            "multi_query queries exceeds configured maximum of {max_queries}"
+            "multi_query operations exceeds configured maximum of {max_queries}"
         )));
     }
 
-    let mut aliases = HashSet::<String>::with_capacity(queries.len());
-    let mut prepared = Vec::<PreparedMultiQuery>::with_capacity(queries.len());
-    for (index, query) in queries.into_iter().enumerate() {
-        let alias = query.alias.trim().to_string();
+    let mut aliases = HashSet::<String>::with_capacity(operations.len());
+    let mut prepared = Vec::<PreparedMultiQuery>::with_capacity(operations.len());
+    for (index, query) in operations.into_iter().enumerate() {
+        let alias = query
+            .alias
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
         if alias.is_empty() {
             return Err(AppError::BadRequest(format!(
-                "multi_query queries[{index}].alias must be non-empty"
+                "multi_query operations[{index}].alias must be non-empty"
             )));
         }
         if !aliases.insert(alias.clone()) {
@@ -553,76 +558,78 @@ fn prepare_multi_queries(
     Ok((on_error, prepared))
 }
 
-fn normalize_multi_query_item(query: MultiQueryItem, index: usize) -> AppResult<OperationPayload> {
-    let MultiQueryItem {
+fn normalize_multi_query_item(query: BatchOperation, index: usize) -> AppResult<OperationPayload> {
+    let BatchOperation {
+        operation,
         namespace,
-        namespaces,
         mut payload,
         ..
     } = query;
-    if payload.queries.is_some() || payload.on_error.is_some() {
+    if let Some(operation) = operation {
+        let operation = operation.trim();
+        if operation != "query" {
+            return Err(AppError::BadRequest(format!(
+                "multi_query operations[{index}].operation must be query when provided"
+            )));
+        }
+    }
+    if payload.operations.is_some() || payload.on_error.is_some() {
         return Err(AppError::BadRequest(format!(
-            "multi_query queries[{index}] cannot contain a nested multi_query payload"
+            "multi_query operations[{index}] cannot contain a nested batch payload"
         )));
     }
     if payload.collection.is_some() || payload.namespaces.is_some() {
         return Err(AppError::BadRequest(format!(
-            "multi_query queries[{index}] namespace selector must be on the query item"
+            "multi_query operations[{index}] namespace selector must be on the operation item"
         )));
     }
-    if namespace.is_some() && namespaces.is_some() {
-        return Err(AppError::BadRequest(format!(
-            "multi_query queries[{index}] cannot provide both namespace and namespaces"
-        )));
+    match namespace {
+        Some(NamespaceSelector::One(namespace)) => {
+            let namespace = namespace.trim().to_string();
+            if namespace.is_empty() {
+                return Err(AppError::BadRequest(format!(
+                    "multi_query operations[{index}].namespace must be non-empty"
+                )));
+            }
+            if namespace == "*" {
+                payload.namespaces = Some(vec!["*".to_string()]);
+                payload.scope = Some("all".to_string());
+            } else {
+                payload.collection = Some(namespace);
+            }
+            Ok(payload)
+        }
+        Some(NamespaceSelector::Many(namespaces)) => {
+            let mut namespaces = namespaces
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            namespaces.sort();
+            namespaces.dedup();
+            if namespaces.is_empty() {
+                return Err(AppError::BadRequest(format!(
+                    "multi_query operations[{index}].namespace array must be non-empty"
+                )));
+            }
+            if namespaces.iter().any(|value| value == "*") && namespaces.len() > 1 {
+                return Err(AppError::BadRequest(format!(
+                    "multi_query operations[{index}].namespace array cannot include '*' with other values"
+                )));
+            }
+            if namespaces.len() == 1 && namespaces[0] == "*" {
+                payload.scope = Some("all".to_string());
+            }
+            payload.namespaces = Some(namespaces);
+            Ok(payload)
+        }
+        None => Err(AppError::BadRequest(format!(
+            "multi_query operations[{index}] requires namespace"
+        ))),
     }
-
-    if let Some(namespace) = namespace {
-        let namespace = namespace.trim().to_string();
-        if namespace.is_empty() {
-            return Err(AppError::BadRequest(format!(
-                "multi_query queries[{index}].namespace must be non-empty"
-            )));
-        }
-        if namespace == "*" {
-            payload.namespaces = Some(vec!["*".to_string()]);
-            payload.scope = Some("all".to_string());
-        } else {
-            payload.collection = Some(namespace);
-        }
-        return Ok(payload);
-    }
-
-    if let Some(namespaces) = namespaces {
-        let mut namespaces = namespaces
-            .into_iter()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>();
-        namespaces.sort();
-        namespaces.dedup();
-        if namespaces.is_empty() {
-            return Err(AppError::BadRequest(format!(
-                "multi_query queries[{index}].namespaces must be non-empty"
-            )));
-        }
-        if namespaces.iter().any(|value| value == "*") && namespaces.len() > 1 {
-            return Err(AppError::BadRequest(format!(
-                "multi_query queries[{index}].namespaces cannot include '*' with other values"
-            )));
-        }
-        if namespaces.len() == 1 && namespaces[0] == "*" {
-            payload.scope = Some("all".to_string());
-        }
-        payload.namespaces = Some(namespaces);
-        return Ok(payload);
-    }
-
-    Err(AppError::BadRequest(format!(
-        "multi_query queries[{index}] requires namespace or namespaces"
-    )))
 }
 
-fn multi_query_error_value(error: AppError) -> Value {
+fn batch_error_value(error: AppError) -> Value {
     let (code, message) = match error {
         AppError::BadRequest(message) => ("bad_request", message),
         AppError::Unauthorized(message) => ("unauthorized", message),
@@ -946,14 +953,14 @@ mod multi_query_tests {
     #[test]
     fn multi_query_validation_normalizes_children_before_execution() {
         let request = payload(json!({
-            "queries": [
+            "operations": [
                 {"alias": "users", "namespace": "users", "payload": {"limit": 10}},
-                {"alias": "all", "namespaces": ["orders", "admins"], "payload": {"fields": ["name"]}}
+                {"alias": "all", "namespace": ["orders", "admins"], "payload": {"fields": ["name"]}}
             ]
         }));
 
         let (on_error, queries) = prepare_multi_queries(request, 20).expect("valid batch");
-        assert_eq!(on_error, MultiQueryOnError::Fail);
+        assert_eq!(on_error, BatchOnError::Fail);
         assert_eq!(queries.len(), 2);
         assert_eq!(queries[0].payload.collection.as_deref(), Some("users"));
         assert_eq!(
@@ -965,7 +972,7 @@ mod multi_query_tests {
     #[test]
     fn multi_query_validation_rejects_alias_scope_and_size_errors() {
         let duplicate = payload(json!({
-            "queries": [
+            "operations": [
                 {"alias": "same", "namespace": "users", "payload": {}},
                 {"alias": "same", "namespace": "orders", "payload": {}}
             ]
@@ -973,12 +980,12 @@ mod multi_query_tests {
         assert!(prepare_multi_queries(duplicate, 20).is_err());
 
         let missing_namespace = payload(json!({
-            "queries": [{"alias": "users", "payload": {}}]
+            "operations": [{"alias": "users", "payload": {}}]
         }));
         assert!(prepare_multi_queries(missing_namespace, 20).is_err());
 
         let oversized = payload(json!({
-            "queries": [
+            "operations": [
                 {"alias": "one", "namespace": "users", "payload": {}},
                 {"alias": "two", "namespace": "orders", "payload": {}}
             ]
@@ -992,7 +999,7 @@ mod multi_query_tests {
             "db": "app/main",
             "operation": "multi_query",
             "payload": {
-                "queries": [{"alias": "users", "namespace": "users", "payload": {}}]
+                "operations": [{"alias": "users", "namespace": "users", "payload": {}}]
             }
         }))
         .expect("valid gateway request");
