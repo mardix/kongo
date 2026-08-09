@@ -97,9 +97,14 @@ async fn transaction(
         .map_err(|e| AppError::Internal(format!("tx begin failed: {e}")))?;
 
     let mut executed = 0_usize;
+    let mut skipped = 0_usize;
     for op in ops {
         match op.operation.as_str() {
-            "insert" => tx_insert(&tx, &op.payload).await?,
+            "insert" => {
+                if !tx_insert(&tx, &op.payload).await? {
+                    skipped += 1;
+                }
+            }
             "update" => tx_update(&tx, &op.payload).await?,
             "delete" => tx_delete(&tx, &op.payload).await?,
             _ => {
@@ -126,17 +131,31 @@ async fn transaction(
 
     Ok(GatewayResponse::ok(Some(json!({
         "count": executed,
+        "skipped_count": skipped,
         "message": "transaction_committed"
     }))))
 }
 
-async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<()> {
+async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<bool> {
     let collection = require_collection(payload)?;
     let lifecycle_specs = parse_document_lifecycle(payload.lifecycle.clone())?;
     let mut doc = require_object(payload.data.clone(), "data")?;
     expand_kdb_macros_in_value(&mut doc)?;
     let allow_system_timestamps = payload.allow_system_timestamps.unwrap_or(false);
     let id = ensure_or_get_id(&mut doc)?;
+    let unique_fields = normalize_unique_fields(payload.unique_fields.clone())?;
+    let on_conflict = parse_insert_on_conflict(payload.on_conflict.as_deref())?;
+    if !unique_fields.is_empty() {
+        let pairs = resolve_unique_pairs(&doc, &unique_fields)?;
+        if !pairs.is_empty() && exists_by_unique_pairs_on_tx(tx, &collection, &pairs).await? {
+            if on_conflict == "error" {
+                return Err(AppError::Conflict(
+                    "insert unique_fields conflict".to_string(),
+                ));
+            }
+            return Ok(false);
+        }
+    }
     let (created_at, modified_at) = resolve_insert_timestamps(&doc, allow_system_timestamps)?;
     let data = doc.to_string();
     let size = data.len() as i64;
@@ -165,7 +184,7 @@ async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
     for spec in &lifecycle_specs {
         upsert_transition_on_tx(tx, &id, &collection, spec).await?;
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<()> {
@@ -826,14 +845,10 @@ fn unique_signature(pairs: &[(String, Value)]) -> AppResult<String> {
         .map_err(|e| AppError::Internal(format!("unique signature encode failed: {e}")))
 }
 
-async fn exists_by_unique_pairs(
-    conn: &libsql::Connection,
+fn build_unique_check_query(
     collection: &str,
     pairs: &[(String, Value)],
-) -> AppResult<bool> {
-    if pairs.is_empty() {
-        return Ok(false);
-    }
+) -> AppResult<(String, Vec<libsql::Value>)> {
     let mut binds = vec![libsql::Value::Text(collection.to_string())];
     let mut clauses = Vec::<String>::new();
     for (path, v) in pairs {
@@ -865,9 +880,23 @@ async fn exists_by_unique_pairs(
         }
     }
     let where_clause = clauses.join(" AND ");
-    let sql = format!(
-        "SELECT 1 FROM __kdb_documents WHERE collection = ? AND {where_clause} LIMIT 1"
-    );
+    Ok((
+        format!(
+            "SELECT 1 FROM __kdb_documents WHERE collection = ? AND {where_clause} LIMIT 1"
+        ),
+        binds,
+    ))
+}
+
+async fn exists_by_unique_pairs(
+    conn: &libsql::Connection,
+    collection: &str,
+    pairs: &[(String, Value)],
+) -> AppResult<bool> {
+    if pairs.is_empty() {
+        return Ok(false);
+    }
+    let (sql, binds) = build_unique_check_query(collection, pairs)?;
     let mut rows = conn
         .query(&sql, binds)
         .await
@@ -876,6 +905,26 @@ async fn exists_by_unique_pairs(
         .next()
         .await
         .map_err(|e| AppError::Internal(format!("unique check row read failed: {e}")))?
+        .is_some())
+}
+
+async fn exists_by_unique_pairs_on_tx(
+    tx: &libsql::Transaction,
+    collection: &str,
+    pairs: &[(String, Value)],
+) -> AppResult<bool> {
+    if pairs.is_empty() {
+        return Ok(false);
+    }
+    let (sql, binds) = build_unique_check_query(collection, pairs)?;
+    let mut rows = tx
+        .query(&sql, binds)
+        .await
+        .map_err(|e| AppError::Internal(format!("transaction unique check query failed: {e}")))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("transaction unique check row failed: {e}")))?
         .is_some())
 }
 

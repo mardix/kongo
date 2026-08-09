@@ -283,6 +283,18 @@ assert_contains "$INS_ABS" '"inserted_count":1' "insert should insert first comp
 INS_ABS2="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"insert","payload":{"collection":"users","data":{"email":"nobody@example.com","tenant":{"id":"t1"},"name":"Nobody Again"},"unique_fields":["tenant.id","email"],"on_conflict":"skip"}}')"
 assert_contains "$INS_ABS2" '"skipped_count":1' "insert should skip composite unique conflict"
 
+TX_UNIQUE_SKIP="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"transaction","data":[{"operation":"insert","namespace":"tx_unique","payload":{"data":{"tenant":{"id":"t1"},"email":"same@example.com","name":"First"},"unique_fields":["tenant.id","email"],"on_conflict":"skip"}},{"operation":"insert","namespace":"tx_unique","payload":{"data":{"tenant":{"id":"t1"},"email":"same@example.com","name":"Second"},"unique_fields":["tenant.id","email"],"on_conflict":"skip"}}]}')"
+assert_contains "$TX_UNIQUE_SKIP" '"status":"success"' "transaction unique_fields skip should commit"
+assert_contains "$TX_UNIQUE_SKIP" '"skipped_count":1' "transaction should report a skipped unique insert"
+TX_UNIQUE_SKIP_COUNT="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"count","namespace":"tx_unique","payload":{"filter":{"tenant.id":"t1","email":"same@example.com"}}}')"
+assert_contains "$TX_UNIQUE_SKIP_COUNT" '"count":1' "transaction unique check should see earlier inserts in the same transaction"
+
+TX_UNIQUE_ERROR="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"transaction","data":[{"operation":"insert","namespace":"tx_unique","payload":{"data":{"tenant":{"id":"t2"},"email":"rollback@example.com","name":"Rollback First"},"unique_fields":["tenant.id","email"],"on_conflict":"error"}},{"operation":"insert","namespace":"tx_unique","payload":{"data":{"tenant":{"id":"t2"},"email":"rollback@example.com","name":"Rollback Second"},"unique_fields":["tenant.id","email"],"on_conflict":"error"}}]}')"
+assert_contains "$TX_UNIQUE_ERROR" '"status":"error"' "transaction unique_fields error should fail"
+assert_contains "$TX_UNIQUE_ERROR" 'insert unique_fields conflict' "transaction should return the unique conflict"
+TX_UNIQUE_ROLLBACK_COUNT="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"count","namespace":"tx_unique","payload":{"filter":{"tenant.id":"t2","email":"rollback@example.com"}}}')"
+assert_contains "$TX_UNIQUE_ROLLBACK_COUNT" '"count":0' "transaction unique conflict should roll back earlier child inserts"
+
 echo "[12/22] query + update"
 GET_ONE="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"smoke\",\"operation\":\"query\",\"namespace\":\"*\",\"payload\":{\"filter\":{\"_id\":\"$ID1\"}}}")"
 assert_contains "$GET_ONE" '"count":1' "query should return one row"

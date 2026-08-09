@@ -1999,6 +1999,8 @@ Unlike the other document operations, transaction entries are provided in top-le
 - Each nested operation supplies its own `namespace` and `payload` as required by that operation.
 - A nested operation cannot override the outer database.
 - If any nested operation fails, the entire transaction is rolled back.
+- Nested `insert` supports `unique_fields` and `on_conflict:"skip"|"error"`. The check runs inside the active transaction, so it sees both existing documents and earlier nested inserts.
+- A skipped unique insert does not create its document or lifecycle transitions. The transaction response reports the number under `skipped_count`.
 
 ##### Example
 
@@ -2026,6 +2028,47 @@ Unlike the other document operations, transaction entries are provided in top-le
 ```
 
 Use `transaction` for short, related mutation sets. Large ingestion remains better suited to `insert` with array data or the resumable `import_jsonl` job.
+
+##### Insert With Composite Uniqueness
+
+`on_conflict:"skip"` keeps the transaction running when the composite value already exists. Use `"error"` when a conflict must roll back every nested operation.
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "transaction",
+  "data": [
+    {
+      "operation": "insert",
+      "namespace": "users",
+      "payload": {
+        "data": {
+          "tenant": {"id": "tenant_01"},
+          "profile": {"email": "ada@example.com"},
+          "name": "Ada"
+        },
+        "unique_fields": ["tenant.id", "profile.email"],
+        "on_conflict": "error"
+      }
+    }
+  ]
+}
+```
+
+Successful transaction responses keep `count` as the number of processed nested operation envelopes and include `skipped_count` for unique inserts skipped by policy:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "count": 2,
+    "skipped_count": 1,
+    "message": "transaction_committed"
+  },
+  "committed": true,
+  "is_async_ack": false
+}
+```
 
 #### Document Operators and Query Shaping
 

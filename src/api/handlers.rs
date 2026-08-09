@@ -881,7 +881,7 @@ pub async fn meta_operations(
     "list_jobs":{{"writes":false,"required":[],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)","status","limit","offset"],"description":"List async jobs across supported job types"}},
     "continue_job":{{"writes":true,"required":["job_id"],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)"],"description":"Resume/retry a job when supported by its job type"}},
     "abort_job":{{"writes":true,"required":["job_id"],"optional":["job_type(import_jsonl|export_jsonl|create_backup|reindex_fts|drop_fts_index|vacuum_db|recompute_stats|replication)"],"description":"Abort/cancel a job when supported by its job type"}},
-    "transaction":{{"writes":true,"required":["data(array<operation>)"],"optional":[],"description":"Atomic operation array"}}
+    "transaction":{{"writes":true,"required":["data(array<operation>)"],"optional":["data[].payload.unique_fields","data[].payload.on_conflict(skip|error)"],"description":"Atomically apply insert/update/delete operations. Nested inserts support namespace-scoped composite unique_fields checks inside the active transaction"}}
   }}
 }}"#,
         env!("CARGO_PKG_VERSION"),

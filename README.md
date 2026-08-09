@@ -882,7 +882,7 @@ Run multiple write operations atomically, as a single unit.
 
 | Op | Needs | What it does |
 |---|---|---|
-| `transaction` | `data[]` (array of ops) | Run `insert`/`update`/`delete` atomically as one unit. |
+| `transaction` | `data[]` (array of ops) | Run `insert`/`update`/`delete` atomically. Nested inserts support `unique_fields` and `on_conflict`. |
 
 **`transaction`**:
 
