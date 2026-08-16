@@ -397,7 +397,7 @@
   }
 
   .document-tree {
-    @apply overflow-hidden rounded-xl border border-neutral/20 bg-slate-50;
+    @apply overflow-hidden rounded-lg border border-slate-300 bg-white;
   }
 
   .document-tree-toolbar {
@@ -405,7 +405,7 @@
   }
 
   .document-tree-body {
-    @apply max-h-[calc(100vh-310px)] space-y-2 overflow-auto p-3;
+    @apply max-h-[calc(100vh-310px)] overflow-auto bg-white px-3 py-3 font-mono text-sm leading-6;
   }
 
   .document-tree-footer {
@@ -413,43 +413,201 @@
   }
 
   .document-tree-node {
-    @apply overflow-hidden rounded-lg border;
+    @apply min-w-max;
   }
 
   .document-tree-row {
-    @apply grid min-w-[620px] grid-cols-[28px_minmax(140px,0.65fr)_96px_minmax(240px,1.5fr)] items-center gap-2 bg-transparent px-3 py-2.5;
+    @apply grid min-h-7 min-w-[640px] grid-cols-[22px_minmax(0,1fr)_auto] items-start gap-1 rounded px-1 py-0.5 font-mono;
   }
 
   button.document-tree-row {
-    @apply cursor-pointer transition hover:bg-white/60 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-primary/20;
+    @apply cursor-pointer transition hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-primary/20;
   }
 
   .document-tree-chevron {
-    @apply flex h-7 w-7 items-center justify-center rounded-md text-lg font-semibold text-slate-500;
+    @apply flex h-6 w-5 items-center justify-center text-base font-bold text-slate-500;
   }
 
   .document-tree-chevron-placeholder {
-    @apply block h-7 w-7;
+    @apply block h-6 w-5;
   }
 
   .document-tree-key {
-    @apply truncate font-mono text-xs font-semibold text-slate-800;
+    @apply font-mono font-semibold text-sky-800;
   }
 
-  .document-tree-summary {
-    @apply flex min-w-0 items-center gap-2 text-xs text-slate-500;
+  .document-tree-index {
+    @apply mr-2 inline-block min-w-5 text-right text-xs text-slate-400;
+  }
+
+  .document-tree-colon {
+    @apply mr-2 text-slate-500;
+  }
+
+  .document-tree-expression {
+    @apply min-w-0 whitespace-nowrap;
+  }
+
+  .document-tree-delimiter,
+  .document-tree-comma {
+    @apply font-bold text-slate-700;
+  }
+
+  .document-tree-ellipsis {
+    @apply px-1 text-slate-400;
+  }
+
+  .document-tree-type {
+    @apply ml-5 whitespace-nowrap pt-0.5 text-[11px] font-normal italic text-slate-400;
   }
 
   .document-tree-value {
-    @apply min-w-0 text-sm leading-5;
+    @apply min-w-0 font-mono text-sm leading-6;
+  }
+
+  .document-tree-string {
+    @apply text-emerald-800;
+  }
+
+  .document-tree-number {
+    @apply text-violet-700;
+  }
+
+  .document-tree-boolean {
+    @apply text-amber-700;
+  }
+
+  .document-tree-null {
+    @apply italic text-slate-400;
   }
 
   .document-tree-children {
-    @apply space-y-2 border-t border-black/5 py-2 pl-5 pr-2;
+    @apply ml-[11px] border-l border-slate-200 pl-[11px];
   }
 
-  .document-tree-empty {
-    @apply rounded-lg border border-dashed border-slate-300 bg-white/70 px-4 py-3 text-center text-xs italic text-slate-500;
+  .document-tree-code-line {
+    @apply grid min-h-7 min-w-[640px] grid-cols-[22px_minmax(0,1fr)] items-center gap-1 rounded px-1 py-0.5 font-mono;
+  }
+
+  .document-tree-gutter {
+    @apply block h-6 w-5;
+  }
+
+  .document-tree-closing-line {
+    @apply -ml-[12px];
+  }
+
+  .document-tree-root {
+    @apply ml-[11px] border-l border-slate-200 pl-[11px];
+  }
+
+  .document-table-panel {
+    @apply overflow-hidden rounded-xl border border-slate-300 bg-white;
+  }
+
+  .document-table-toolbar {
+    @apply flex flex-wrap items-center justify-between gap-4 border-b border-slate-300 bg-white px-4 py-3;
+  }
+
+  .document-table-count {
+    @apply inline-flex min-w-7 items-center justify-center rounded-full bg-slate-100 px-2 py-0.5 font-mono text-xs font-bold text-slate-700;
+  }
+
+  .document-table-control-group {
+    @apply inline-flex overflow-hidden rounded-md border border-slate-300 bg-white;
+  }
+
+  .document-table-control {
+    @apply min-h-8 border-r border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-600 transition last:border-r-0 hover:bg-slate-50 hover:text-slate-950;
+  }
+
+  .document-table-control-active {
+    @apply bg-slate-100 text-slate-950;
+  }
+
+  .document-table-control-save {
+    @apply bg-primary text-white hover:bg-primary/90 hover:text-white;
+  }
+
+  .document-table-select {
+    @apply min-h-8 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 outline-none transition hover:border-slate-400 focus:border-primary;
+  }
+
+  .document-table-viewport {
+    @apply max-h-[68vh] max-w-full overflow-auto bg-white;
+  }
+
+  .document-table-grid {
+    @apply w-max min-w-full border-separate border-spacing-0 text-sm;
+  }
+
+  .document-table-head {
+    @apply sticky top-0 z-20 border-b border-r border-slate-300 bg-slate-100 px-3 py-2.5 text-left text-[11px] font-bold uppercase tracking-[0.08em] text-slate-600 last:border-r-0;
+  }
+
+  .document-table-head-number {
+    @apply left-0 z-40 w-[52px] min-w-[52px] text-center;
+  }
+
+  .document-table-head-check {
+    @apply left-[52px] z-40 w-[44px] min-w-[44px] text-center;
+  }
+
+  .document-table-head-id {
+    @apply left-[96px] z-40 w-[280px] min-w-[280px];
+  }
+
+  .document-table-head-scroll {
+    @apply min-w-[190px];
+  }
+
+  .document-table-head-actions {
+    @apply right-0 z-40 w-[92px] min-w-[92px] border-l border-r-0 text-right;
+  }
+
+  .document-table-row {
+    @apply bg-white transition-colors even:bg-slate-50/60 hover:bg-sky-50;
+  }
+
+  .document-table-row-selected {
+    @apply bg-sky-50 even:bg-sky-50 hover:bg-sky-100;
+  }
+
+  .document-table-cell {
+    @apply border-b border-r border-slate-200 bg-inherit px-3 py-2.5 align-top last:border-r-0;
+  }
+
+  .document-table-cell-number {
+    @apply sticky left-0 z-10 w-[52px] min-w-[52px] text-center font-mono text-xs font-medium text-slate-500;
+  }
+
+  .document-table-cell-check {
+    @apply sticky left-[52px] z-10 w-[44px] min-w-[44px] text-center;
+  }
+
+  .document-table-cell-id {
+    @apply sticky left-[96px] z-10 w-[280px] min-w-[280px] max-w-[280px] font-mono text-xs font-semibold text-slate-900;
+  }
+
+  .document-table-cell-value {
+    @apply max-w-[300px] font-mono text-xs leading-5 text-slate-800;
+  }
+
+  .document-table-cell-actions {
+    @apply sticky right-0 z-10 w-[92px] min-w-[92px] border-l border-r-0 text-right;
+  }
+
+  .document-table-view-button {
+    @apply rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:border-slate-500 hover:text-slate-950;
+  }
+
+  .document-table-head input[type="checkbox"],
+  .document-table-cell input[type="checkbox"] {
+    @apply h-3.5 w-3.5 accent-primary;
+  }
+
+  .document-table-footer {
+    @apply flex flex-wrap items-center justify-between gap-3 border-t border-slate-300 bg-slate-50 px-4 py-3 text-xs text-slate-600;
   }
 }
 

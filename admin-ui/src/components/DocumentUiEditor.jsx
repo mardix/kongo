@@ -167,40 +167,41 @@ export function DocumentUiEditor({
 
 function DocumentTreeView({ nodes, error, onExpandAll, onCollapseAll, onToggle }) {
   const totalFields = countDocumentNodes(nodes);
+  const [showTypes, setShowTypes] = useState(true);
   return (
     <section className="document-tree">
       <div className="document-tree-toolbar">
         <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="badge badge-info">Document</span>
-            <span className="badge badge-muted">Tree View</span>
-            <span className="text-xs font-semibold text-slate-700">{totalFields} field{totalFields === 1 ? '' : 's'}</span>
-          </div>
-          <p className="mt-1 text-xs text-slate-500">Select an object or array row to expand or collapse its contents.</p>
+          <div className="font-mono text-sm font-bold text-slate-900">JSON Tree</div>
+          <p className="mt-0.5 text-xs text-slate-500">{totalFields} field{totalFields === 1 ? '' : 's'} · Select an object or array to toggle its children.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => setShowTypes((value) => !value)} className="btn-label">{showTypes ? 'Hide Types' : 'Show Types'}</button>
           <button type="button" onClick={onExpandAll} className="btn-label">Expand All</button>
           <button type="button" onClick={onCollapseAll} className="btn-label">Collapse All</button>
         </div>
       </div>
 
       <div className="document-tree-body">
-        {nodes.length ? nodes.map((node, index) => (
-          <DocumentTreeNode
-            key={node.id}
-            node={node}
-            index={index}
-            parentType="object"
-            parentPath=""
-            depth={0}
-            onToggle={onToggle}
-          />
-        )) : (
-          <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center">
-            <div className="text-sm font-semibold text-slate-800">Empty Document</div>
-            <p className="mt-1 text-xs text-slate-500">This document contains an empty JSON object.</p>
+        <div className="document-tree-code-line"><span className="document-tree-gutter" /><span className="document-tree-delimiter">{'{'}</span></div>
+        {nodes.length ? (
+          <div className="document-tree-root">
+            {nodes.map((node, index) => (
+              <DocumentTreeNode
+                key={node.id}
+                node={node}
+                index={index}
+                isLast={index === nodes.length - 1}
+                parentType="object"
+                parentPath=""
+                depth={0}
+                onToggle={onToggle}
+                showTypes={showTypes}
+              />
+            ))}
           </div>
-        )}
+        ) : null}
+        <div className="document-tree-code-line"><span className="document-tree-gutter" /><span className="document-tree-delimiter">{'}'}</span></div>
       </div>
 
       <div className="document-tree-footer">
@@ -213,51 +214,54 @@ function DocumentTreeView({ nodes, error, onExpandAll, onCollapseAll, onToggle }
   );
 }
 
-function DocumentTreeNode({ node, index, parentType, parentPath, depth, onToggle }) {
+function DocumentTreeNode({ node, index, isLast, parentType, parentPath, depth, onToggle, showTypes }) {
   const structured = isStructured(node.type);
   const path = nodePath(parentPath, parentType, node.key, index);
-  const depthTone = depth % 6;
-  const keyLabel = parentType === 'array' ? `[${index}]` : node.key;
+  const keyLabel = parentType === 'array' ? String(index) : node.key;
   const countLabel = node.type === 'array'
     ? `${node.children.length} item${node.children.length === 1 ? '' : 's'}`
     : `${node.children.length} field${node.children.length === 1 ? '' : 's'}`;
+  const open = node.type === 'array' ? '[' : '{';
+  const close = node.type === 'array' ? ']' : '}';
+  const property = parentType === 'array'
+    ? <span className="document-tree-index" title={`Array index ${index}`}>{index}</span>
+    : <><span className="document-tree-key">&quot;{keyLabel}&quot;</span><span className="document-tree-colon">:</span></>;
 
   return (
-    <div className={`document-tree-node json-node-depth-${depthTone}`}>
+    <div className="document-tree-node">
       {structured ? (
         <button type="button" onClick={() => onToggle(node.id)} className="document-tree-row w-full text-left" title={path}>
           <span className="document-tree-chevron">{node.expanded ? '⌄' : '›'}</span>
-          <span className="document-tree-key">{keyLabel}</span>
-          <span className={`json-type-label json-type-${node.type}`}>{jsonTypeLabel(node.type)}</span>
-          <span className="document-tree-summary">
-            <span className="font-mono text-slate-400">{node.type === 'array' ? '[ ]' : '{ }'}</span>
-            <span>{countLabel}</span>
-          </span>
+          <span className="document-tree-expression">{property}<span className="document-tree-delimiter">{open}</span>{!node.expanded ? <><span className="document-tree-ellipsis">…</span><span className="document-tree-delimiter">{close}</span></> : null}<span className="document-tree-comma">{!node.expanded && !isLast ? ',' : ''}</span></span>
+          {showTypes ? <span className="document-tree-type">{documentValueTypeLabel(node, keyLabel)} · {countLabel}</span> : null}
         </button>
       ) : (
         <div className="document-tree-row" title={path}>
           <span className="document-tree-chevron-placeholder" />
-          <span className="document-tree-key">{keyLabel}</span>
-          <span className={`json-type-label json-type-${node.type}`}>{jsonTypeLabel(node.type)}</span>
-          <DocumentTreeValue node={node} />
+          <span className="document-tree-expression">{property}<DocumentTreeValue node={node} /><span className="document-tree-comma">{isLast ? '' : ','}</span></span>
+          {showTypes ? <span className="document-tree-type">{documentValueTypeLabel(node, keyLabel)}</span> : null}
         </div>
       )}
 
       {structured && node.expanded ? (
-        <div className={`document-tree-children json-node-group-depth-${(depth + 1) % 6}`}>
+        <div className="document-tree-children">
           {node.children.length ? node.children.map((child, childIndex) => (
             <DocumentTreeNode
               key={child.id}
               node={child}
               index={childIndex}
+              isLast={childIndex === node.children.length - 1}
               parentType={node.type}
               parentPath={path}
               depth={depth + 1}
               onToggle={onToggle}
+              showTypes={showTypes}
             />
-          )) : (
-            <div className="document-tree-empty">Empty {node.type}</div>
-          )}
+          )) : null}
+          <div className="document-tree-code-line document-tree-closing-line">
+            <span className="document-tree-gutter" />
+            <span className="document-tree-delimiter">{close}</span><span className="document-tree-comma">{isLast ? '' : ','}</span>
+          </div>
         </div>
       ) : null}
     </div>
@@ -265,10 +269,46 @@ function DocumentTreeNode({ node, index, parentType, parentPath, depth, onToggle
 }
 
 function DocumentTreeValue({ node }) {
-  if (node.type === 'null') return <span className="document-tree-value font-mono italic text-slate-400">null</span>;
-  if (node.type === 'boolean') return <span className="document-tree-value font-mono font-semibold text-amber-700">{node.value ? 'true' : 'false'}</span>;
-  if (node.type === 'number') return <span className="document-tree-value font-mono font-semibold text-emerald-700">{node.value}</span>;
-  return <span className="document-tree-value whitespace-pre-wrap break-words text-slate-700">{node.value || <span className="italic text-slate-400">empty string</span>}</span>;
+  const [expanded, setExpanded] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  if (node.type === 'null') return <span className="document-tree-value document-tree-null">null</span>;
+  if (node.type === 'boolean') return <span className="document-tree-value document-tree-boolean">{node.value ? 'true' : 'false'}</span>;
+  if (node.type === 'number') return <span className="document-tree-value document-tree-number">{node.value}</span>;
+  const value = String(node.value || '');
+  const long = value.length > 180 || value.includes('\n');
+  const clipped = expanded ? value.slice(0, 1800) : value.slice(0, 180);
+  return (
+    <span className="document-tree-value document-tree-string min-w-0">
+      <span className={`${expanded ? 'max-h-40 overflow-auto' : 'line-clamp-2'} inline-block max-w-[min(52vw,70rem)] whitespace-pre-wrap break-words align-top`}>
+        &quot;{value ? clipped : ''}
+        {value.length > clipped.length ? '…' : ''}
+        &quot;
+      </span>
+      {long ? (
+        <span className="mt-1 flex flex-wrap gap-2">
+          <button type="button" onClick={() => setExpanded((current) => !current)} className="text-xs font-semibold text-primary">{expanded ? 'Collapse' : 'Expand'}</button>
+          {expanded && value.length > 1800 ? <button type="button" onClick={() => setModalOpen(true)} className="text-xs font-semibold text-primary">View Full Value</button> : null}
+        </span>
+      ) : null}
+      {modalOpen ? createPortal(
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-label="Full field value">
+          <div className="flex max-h-[88vh] w-full max-w-4xl flex-col rounded-xl border border-slate-300 bg-white">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+              <h3 className="text-base font-bold text-slate-950">Full Field Value</h3>
+              <button type="button" onClick={() => setModalOpen(false)} className="btn-secondary">Close</button>
+            </div>
+            <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-sm text-slate-800">{value}</pre>
+          </div>
+        </div>,
+        document.body
+      ) : null}
+    </span>
+  );
+}
+
+function documentValueTypeLabel(node, keyLabel) {
+  if (node.type === 'string' && (keyLabel === '_id' || keyLabel.endsWith('_id')) && /^[0-9a-f]{32}$/i.test(String(node.value || ''))) return 'uuid';
+  return jsonTypeLabel(node.type);
 }
 
 function JsonNodeEditor({

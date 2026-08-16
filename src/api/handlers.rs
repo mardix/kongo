@@ -444,7 +444,7 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kongo {version} Documentation</title>
+  <title>KiDB {version} Documentation</title>
   <style>
     * {{
       box-sizing: border-box;
@@ -755,7 +755,7 @@ pub async fn docs(State(state): State<AppState>) -> AppResult<Html<String>> {
   <div class="docs-layout">
     <aside class="docs-sidebar">
       <div class="docs-sidebar-header">
-        <div class="docs-sidebar-title">Kongo Documentation</div>
+        <div class="docs-sidebar-title">KiDB Documentation</div>
         <p class="docs-sidebar-subtitle">Contents</p>
         <span class="docs-version">Version {version}</span>
       </div>
@@ -892,7 +892,7 @@ mod docs_tests {
     #[test]
     fn docs_renderer_builds_toc_and_heading_anchors() {
         let (body, toc) = render_docs_markdown(
-            "# Kongo\n\n## API Surface\n\n### `query` operation\n\n## API Surface\n",
+            "# KiDB\n\n## API Surface\n\n### `query` operation\n\n## API Surface\n",
         );
 
         assert!(body.contains("<h2 id=\"api-surface\">API Surface</h2>"));

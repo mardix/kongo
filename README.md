@@ -1,10 +1,10 @@
-# Kongo
+# KiDB
 
-### Hybrid Database Toolkit
+> KiDB = Kongo Index Database
 
-**Kongo** is a lightweight, self-hosted data platform that combines the flexibility of a document database with the power of SQLite. It provides one consistent JSON API for document storage, direct SQL access, identity records, file metadata, metrics, audit logs, full-text search, and database administration.
+**KiDB** is a lightweight, self-hosted data platform that combines the flexibility of a document database with the power of SQLite. It provides one consistent JSON API for document storage, direct SQL access, identity records, file metadata, metrics, audit logs, full-text search, and database administration.
 
-Built in Rust on SQLite/libSQL, Kongo is designed for applications that need a capable embedded or standalone data service without operating a large database stack. It runs locally, in Docker, or with S3-backed storage — and it's exposed as a single RPC-style HTTP endpoint: JSON in, JSON out.
+Built in Rust on SQLite/libSQL, KiDB is designed for applications that need a capable embedded or standalone data service without operating a large database stack. It runs locally, in Docker, or with S3-backed storage — and it's exposed as a single RPC-style HTTP endpoint: JSON in, JSON out.
 
 View the full [Documentation](./DOCUMENTATION.md).
 
@@ -19,7 +19,7 @@ View the full [Documentation](./DOCUMENTATION.md).
 4. [Quick Start](#quick-start)
 5. [API Surface](#api-surface)
 6. [Request / Response Contract](#request--response-contract)
-7. [The Kongo Stack](#the-kongo-stack)
+7. [The KiDB Stack](#the-kongo-stack)
    - [DocumentDB (Data Stack)](#documentdb-data-stack)
    - [Identity](#identity)
    - [Files](#files)
@@ -45,7 +45,7 @@ View the full [Documentation](./DOCUMENTATION.md).
 |---|---|
 | **DocumentDB** | Full-featured document database — CRUD, filters, sorting, projections, lookups |
 | **Identity** | Storage for auth/user records — profiles, statuses, providers, tokens |
-| **Files** | File *metadata* storage (Kongo doesn't store the bytes themselves) |
+| **Files** | File *metadata* storage (KiDB doesn't store the bytes themselves) |
 | **Metrics** | Application metric events — counts, sums, averages, time buckets |
 | **FTSearch** | Full-text search over documents (SQLite FTS5) |
 | **SQLiteDB** | Direct, parameterized SQL access to your own tables |
@@ -61,7 +61,7 @@ View the full [Documentation](./DOCUMENTATION.md).
   Insert, update, delete, query, aggregate, upsert, paginate, project fields, sort, filter, join related documents, and manage TTL or scheduled conditional lifecycle changes.
 
 - **SQLite Interface**
-  Create and inspect user tables, execute parameterized SQL, browse records, and use supported DDL without exposing Kongo's internal tables.
+  Create and inspect user tables, execute parameterized SQL, browse records, and use supported DDL without exposing KiDB's internal tables.
 
 - **Local and S3 Storage**
   Run entirely from local disk or use S3-compatible object storage with local hydration, WAL replication, snapshots, synchronization, and safe recovery.
@@ -106,14 +106,14 @@ View the full [Documentation](./DOCUMENTATION.md).
   Maintain cross-database inventory, lifecycle events, historical database statistics, active connection state, process memory, request counts, latency, and rolling instance metrics.
 
 - **Built-In Admin Interface**
-  Manage multiple Kongo connections and databases through a React interface for DocumentDB, SQLiteDB, Identity, Files, Metrics, Search, Audit Logs, jobs, backups, and system monitoring.
+  Manage multiple KiDB connections and databases through a React interface for DocumentDB, SQLiteDB, Identity, Files, Metrics, Search, Audit Logs, jobs, backups, and system monitoring.
 
 - **Simple Security Model**
   Protect API, documentation, and administration routes with an access key, while supporting an explicit no-auth mode for trusted local development.
 
 ## Deployment Models
 
-Kongo can run as:
+KiDB can run as:
 
 - An embedded local database service
 - A self-hosted Docker application with persistent volumes
@@ -121,7 +121,7 @@ Kongo can run as:
 - A lightweight database gateway for SaaS applications
 - A development and administration layer over SQLite data
 
-Kongo's goal: one compact service for common application data needs, without giving up SQLite's portability, reliability, and direct SQL access.
+KiDB's goal: one compact service for common application data needs, without giving up SQLite's portability, reliability, and direct SQL access.
 
 ---
 
@@ -242,9 +242,9 @@ If `_created_at` is given without `_modified_at`, the latter inherits the former
 
 ---
 
-## The Kongo Stack
+## The KiDB Stack
 
-Kongo's operations are grouped into stacks. Each one covers a distinct slice of what your app needs. Every operation below includes a full, ready-to-send example.
+KiDB's operations are grouped into stacks. Each one covers a distinct slice of what your app needs. Every operation below includes a full, ready-to-send example.
 
 ### DocumentDB (Data Stack)
 
@@ -293,6 +293,8 @@ The bread and butter — documents in, documents out.
 ```
 
 **`update`** — patch many documents by filter:
+
+`update` preserves `_created_at` and automatically refreshes `_modified_at`. Supplying either field in an update payload is rejected, including transaction, upsert-update, and lifecycle-update paths.
 
 ```json
 {
@@ -494,7 +496,7 @@ The bread and butter — documents in, documents out.
 
 ### Identity
 
-Stores login-related metadata for your app. **Kongo does not authenticate anyone** — no password checks, no OAuth validation, no session issuing. It just stores the data your auth layer needs.
+Stores login-related metadata for your app. **KiDB does not authenticate anyone** — no password checks, no OAuth validation, no session issuing. It just stores the data your auth layer needs.
 
 | Op | Needs | What it does |
 |---|---|---|
@@ -668,7 +670,7 @@ Stores login-related metadata for your app. **Kongo does not authenticate anyone
 
 ### Files
 
-Metadata only — Kongo never touches the actual bytes. Your app still owns uploading/downloading to S3, disk, etc.
+Metadata only — KiDB never touches the actual bytes. Your app still owns uploading/downloading to S3, disk, etc.
 
 | Op | Needs | What it does |
 |---|---|---|
@@ -1025,7 +1027,7 @@ Metric ops: `count`, `sum`, `avg`, `min`, `max`, `distinct`, `count_distinct`.
 
 ### Audit Logs
 
-Append-only, immutable activity logging. Kongo doesn't infer who did what — your app explicitly records the events worth keeping.
+Append-only, immutable activity logging. KiDB doesn't infer who did what — your app explicitly records the events worth keeping.
 
 | Op | Needs | What it does |
 |---|---|---|
@@ -1283,7 +1285,7 @@ The most commonly used fields across operations:
 
 ## Configuration Reference
 
-Kongo ships with sensible defaults — you can run it with zero config beyond `KONGODB_ACCESS_KEY`. Everything below is optional tuning.
+KiDB ships with sensible defaults — you can run it with zero config beyond `KONGODB_ACCESS_KEY`. Everything below is optional tuning.
 
 A number of subsystems that used to be individually feature-gated are now **core, always-on features** with internally managed safety thresholds: SQL execution capability, FTS capability, metric events, auto-indexing, JSONB storage, the system catalog, safe hydration, temp-file cleanup, and background job workers. You no longer need to flip a switch for these — they just work.
 
@@ -1341,7 +1343,7 @@ A number of subsystems that used to be individually feature-gated are now **core
 | `KONGODB_SNAPSHOT_RETENTION_DAYS` | `14` | How long snapshots are kept |
 | `KONGODB_REMOTE_SYNC_INTERVAL_SECS` | `10` | `multi` topology manifest polling interval; ignored in `single`, and `0` disables polling |
 
-Snapshots are stored once as `snapshots/<snapshot_id>.db`. The manifest's `current_snapshot_key` selects the hydration source; Kongo does not upload a duplicate `snapshots/current.db` object.
+Snapshots are stored once as `snapshots/<snapshot_id>.db`. The manifest's `current_snapshot_key` selects the hydration source; KiDB does not upload a duplicate `snapshots/current.db` object.
 
 Idle TTL reaper checks do not publish snapshots. A reaper checkpoint is created only when lifecycle cleanup actually changes database data.
 
@@ -1390,7 +1392,7 @@ Idle TTL reaper checks do not publish snapshots. A reaper checkpoint is created 
 
 ## Admin UI
 
-Kongo ships with a built-in Admin UI — a single-page app served directly by Kongo itself, no separate install needed.
+KiDB ships with a built-in Admin UI — a single-page app served directly by KiDB itself, no separate install needed.
 
 - **URL:** `http://<host>:8080/_/kdb/admin/` (path follows `KONGODB_BASE_PATH`)
 - **Toggle:** `KONGODB_ADMIN_UI_ENABLED=true` (default). Set to `false` for API-only deployments.
@@ -1403,7 +1405,7 @@ Kongo ships with a built-in Admin UI — a single-page app served directly by Ko
   - Inspect backups, snapshots, and background jobs
   - Read the rendered docs (same content as `/doc`)
 
-Because it's served same-origin from Kongo, you don't need to configure `KONGODB_CORS_ALLOWED_ORIGINS` just to use it — that setting is only for external browser apps calling the gateway directly.
+Because it's served same-origin from KiDB, you don't need to configure `KONGODB_CORS_ALLOWED_ORIGINS` just to use it — that setting is only for external browser apps calling the gateway directly.
 
 ---
 
@@ -1411,7 +1413,7 @@ Because it's served same-origin from Kongo, you don't need to configure `KONGODB
 
 ### Build Directly From GitHub (No Repo Checkout Needed)
 
-You don't need to clone the repo to build Kongo — Docker can build straight from the GitHub URL. Handy for spinning up a container on a remote host without pulling the source down first.
+You don't need to clone the repo to build KiDB — Docker can build straight from the GitHub URL. Handy for spinning up a container on a remote host without pulling the source down first.
 
 ```bash
 docker build -t kongo-stack:latest https://github.com/mardix/kongo.git#main

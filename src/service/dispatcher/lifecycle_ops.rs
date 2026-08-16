@@ -111,6 +111,7 @@ fn parse_document_lifecycle(value: Option<Value>) -> AppResult<Vec<DocumentLifec
                 "lifecycle.update must be a non-empty object".to_string(),
             ));
         }
+        reject_update_system_timestamps(Some(&update), "lifecycle.update")?;
         if update_obj
             .keys()
             .any(|key| key == "_id" || key.starts_with("_id."))

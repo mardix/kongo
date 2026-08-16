@@ -824,6 +824,42 @@ fn build_offsets(total_count: i64, count: usize, limit: i64, offset: i64) -> (Va
 }
 
 fn validate_accepted_preflight(req: &GatewayRequest) -> AppResult<()> {
+    match req.operation.as_str() {
+        "update" => reject_update_system_timestamps(req.payload.data.as_ref(), "data")?,
+        "upsert" => {
+            reject_update_system_timestamps(req.payload.update_data.as_ref(), "update_data")?
+        }
+        "transaction" => {
+            for (index, operation) in req
+                .payload
+                .operations
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                let operation_name = operation
+                    .operation
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split_once("::")
+                    .map(|(name, _)| name)
+                    .unwrap_or_else(|| operation.operation.as_deref().unwrap_or_default());
+                match operation_name {
+                    "update" => reject_update_system_timestamps(
+                        operation.payload.data.as_ref(),
+                        &format!("operations[{index}].payload.data"),
+                    )?,
+                    "upsert" => reject_update_system_timestamps(
+                        operation.payload.update_data.as_ref(),
+                        &format!("operations[{index}].payload.update_data"),
+                    )?,
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
     let lifecycle = parse_document_lifecycle(req.payload.lifecycle.clone())?;
     if !lifecycle.is_empty() {
         match req.operation.as_str() {
@@ -1319,6 +1355,7 @@ async fn prepare_pending_update_preview(
     req: &GatewayRequest,
 ) -> AppResult<crate::state::PendingWritePreview> {
     let payload = req.payload.clone();
+    reject_update_system_timestamps(payload.data.as_ref(), "data")?;
     let collection = resolve_collection_scope_optional_collection(&payload)?;
     let conn = state
         .db_manager

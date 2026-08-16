@@ -23,10 +23,12 @@ export function WelcomePage({ setPage }) {
         <div className="grid lg:grid-cols-2">
           <div className="flex min-h-[390px] flex-col justify-center p-7 lg:p-10 xl:p-12">
             <div className="text-xs font-bold uppercase tracking-[0.2em] text-primary">Admin Console</div>
-            <h1 className="mt-5 text-5xl font-black tracking-tight text-slate-950">Kongo <span className="font-light">stack</span></h1>
-            <p className="mt-5 max-w-2xl text-lg font-medium leading-8 text-slate-700">One focused console for Document data, Identities, Files, Metric Events, FTSearch, Audit Logs, and SQLite.</p>
+            <h1 className="mt-5 text-5xl font-black tracking-tight text-slate-900">Ki<span className="font-light">DB</span></h1>
+            <p className="mt-5 max-w-2xl text-lg font-medium leading-8 text-slate-700">
+              The admin interface for documents, identities, files, metrics, search, audit logs, and SQL — built into KiDB.
+              </p>
             <p className="mt-6 max-w-2xl text-sm leading-6 text-slate-600">
-              Start by choosing a saved connection. Kongo will verify the host, then show the databases available on that instance.
+              Start by choosing a saved connection. KiDB will verify the host, then show the databases available on that instance.
             </p>
             <div className="mt-8 flex flex-wrap gap-2">
               <button type="button" onClick={() => setPage('settings')} className="btn-primary">
@@ -39,7 +41,7 @@ export function WelcomePage({ setPage }) {
             <div className="w-full">
               <div className="text-xs font-bold uppercase tracking-[0.2em] text-slate-600">How It Works</div>
               <div className="mt-5">
-                <WelcomeStep number="01" title="Connect" description="Choose a Kongodb host and verify access." />
+                <WelcomeStep number="01" title="Connect" description="Choose a KiDB host and verify access." />
                 <WelcomeStep number="02" title="Select a database" description="Browse the host inventory without opening every DB." />
                 <WelcomeStep number="03" title="Work" description="Open the database tools you need from one workspace." />
               </div>
@@ -84,7 +86,7 @@ export function WelcomePage({ setPage }) {
         ) : (
           <div className="grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
             <div>
-              <h3 className="text-lg font-semibold text-slate-950">Add your first Kongodb connection</h3>
+              <h3 className="text-lg font-semibold text-slate-950">Add your first KiDB connection</h3>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">You will need the full endpoint, such as <span className="font-mono text-slate-700">http://localhost:8080/_/kdb</span>, plus an access key if the server requires one.</p>
             </div>
             <button type="button" onClick={() => setPage('settings')} className="btn-primary">Enter Connection Settings</button>
@@ -100,7 +102,7 @@ export function WelcomePage({ setPage }) {
           </div>
         </div>
         <div className="grid border-b border-slate-200 md:grid-cols-3">
-          <HomeTool title="Connections" description="Add, edit, test, and switch saved Kongo hosts." action="Manage Connections" onClick={() => setPage('settings')} />
+          <HomeTool title="Connections" description="Add, edit, test, and switch saved KiDB hosts." action="Manage Connections" onClick={() => setPage('settings')} />
           <HomeTool title="System Metrics" description="Inspect this instance's uptime, traffic, memory, and background queues." action="View Metrics" onClick={() => setPage('metrics')} />
           <HomeTool title="System Admin" description="Access instance tools, database inventory, and the system catalog." action="Open Admin" onClick={() => setPage('admin')} />
         </div>

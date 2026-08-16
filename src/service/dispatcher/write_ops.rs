@@ -118,6 +118,7 @@ fn prepare_upsert_inputs(payload: OperationPayload) -> AppResult<UpsertPreparedI
     };
     let mut update_data = update_data;
     expand_kdb_macros_in_value(&mut update_data)?;
+    reject_update_system_timestamps(Some(&update_data), "update_data")?;
 
     reject_id_field(&insert_data, "insert_data")?;
     if max_docs != 0 || !update_data.is_object() {
@@ -380,6 +381,7 @@ async fn update_inner(
     let payload = req.payload;
     let dry_run = payload.dry_run.unwrap_or(false);
     let replace = payload.replace.unwrap_or(false);
+    reject_update_system_timestamps(payload.data.as_ref(), "data")?;
     if payload.ids.is_some() {
         return Err(AppError::BadRequest(
             "update does not accept ids; use filter with _id.$in or data array with _id"

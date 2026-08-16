@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { connectionScopedKey, useAdmin } from '../context/AdminContext.jsx';
 import { crudPreset } from '../lib/presets.js';
 import { bestRows, extractArray, flattenRow, formatCell, rowColumns } from '../lib/results.js';
@@ -13,6 +14,13 @@ import { AuditLogsPanel } from './AuditLogsPanel.jsx';
 import { DocumentUiEditor } from './DocumentUiEditor.jsx';
 
 const operations = ['query', 'multi_query', 'insert', 'update', 'upsert', 'delete', 'count', 'aggregate', 'transaction', 'custom'];
+const SYSTEM_SETTINGS_NAMESPACE = '__system_settings';
+const DEFAULT_DOCUMENT_TABLE_PREFERENCES = {
+  columnOrder: [],
+  hiddenColumns: [],
+  topLevelOnly: false,
+  defaultSort: '_created_at desc'
+};
 const dbTabs = [
   { id: 'overview', label: 'Overview' },
   { id: 'crud', label: 'DocumentDB' },
@@ -107,6 +115,7 @@ export function DbCrudConsole() {
   const [batchModal, setBatchModal] = useState(null);
   const [responseDurationMs, setResponseDurationMs] = useState(null);
   const [documentSort, setDocumentSort] = useState('_created_at desc');
+  const [documentTablePreferences, setDocumentTablePreferences] = useState(DEFAULT_DOCUMENT_TABLE_PREFERENCES);
   const [requestHistory, setRequestHistory] = useState(() => loadRequestHistory(connectionStorageKey));
   const [historyOpen, setHistoryOpen] = useState(false);
   const [rowDrawer, setRowDrawer] = useState(null);
@@ -206,7 +215,7 @@ export function DbCrudConsole() {
     const loadKey = namespace ? `${activeDb}:${namespace}` : '';
     if (loadKey && datastoreHomeLoadRef.current !== loadKey) {
       datastoreHomeLoadRef.current = loadKey;
-      void loadNamespacePage(namespace, 1, documentPageSize, { collapseRequest: true, filter: {}, sort: '_created_at desc' });
+      void openNamespace(namespace);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.mode, route.tab, datastoreView, activeDb, activeNamespaces.length]);
@@ -348,7 +357,8 @@ export function DbCrudConsole() {
   async function openNamespace(namespace) {
     datastoreHomeLoadRef.current = `${activeDb}:${namespace}`;
     setDatastoreView('home');
-    await loadNamespacePage(namespace, 1, documentPageSize, { collapseRequest: true, filter: {}, sort: '_created_at desc' });
+    const preferences = await loadDocumentTablePreferences(namespace);
+    await loadNamespacePage(namespace, 1, documentPageSize, { collapseRequest: true, filter: {}, sort: preferences.defaultSort });
   }
 
   function changeDatastoreView(view) {
@@ -358,7 +368,7 @@ export function DbCrudConsole() {
     const namespace = available.includes(settings.namespace) ? settings.namespace : available[0];
     if (namespace) {
       datastoreHomeLoadRef.current = `${activeDb}:${namespace}`;
-      void loadNamespacePage(namespace, 1, documentPageSize, { collapseRequest: true, filter: {}, sort: '_created_at desc' });
+      void openNamespace(namespace);
     }
   }
 
@@ -376,8 +386,58 @@ export function DbCrudConsole() {
     setNamespaceTabs((prev) => prev.filter((item) => item !== namespace));
     if (settings.namespace === namespace) {
       const next = namespaceTabs.find((item) => item !== namespace) || '';
-      if (next) void loadNamespacePage(next, 1, documentPageSize, { collapseRequest: true });
+      if (next) void openNamespace(next);
     }
+  }
+
+  async function loadDocumentTablePreferences(namespace) {
+    const target = String(namespace || '').trim();
+    if (!activeDb || !target || target === SYSTEM_SETTINGS_NAMESPACE) {
+      setDocumentTablePreferences(DEFAULT_DOCUMENT_TABLE_PREFERENCES);
+      return DEFAULT_DOCUMENT_TABLE_PREFERENCES;
+    }
+    try {
+      const data = await gateway({
+        db: activeDb,
+        operation: 'query',
+        namespace: SYSTEM_SETTINGS_NAMESPACE,
+        payload: { filter: { _id: documentTablePreferenceId(target) }, limit: 1, force_db: true }
+      });
+      const item = bestRows(data)[0];
+      const preferences = normalizeDocumentTablePreferences(item?.preferences || item?.data?.preferences);
+      setDocumentTablePreferences(preferences);
+      return preferences;
+    } catch (_) {
+      setDocumentTablePreferences(DEFAULT_DOCUMENT_TABLE_PREFERENCES);
+      return DEFAULT_DOCUMENT_TABLE_PREFERENCES;
+    }
+  }
+
+  async function saveDocumentTablePreferences(preferences) {
+    const target = String(settings.namespace || '').trim();
+    const normalized = normalizeDocumentTablePreferences(preferences);
+    if (!activeDb || !target || target === SYSTEM_SETTINGS_NAMESPACE) {
+      setDocumentTablePreferences(normalized);
+      return;
+    }
+    const now = new Date().toISOString();
+    await runStatusCall(async () => {
+      const data = await gateway({
+        db: activeDb,
+        operation: 'upsert',
+        namespace: SYSTEM_SETTINGS_NAMESPACE,
+        payload: {
+          filter: { _id: documentTablePreferenceId(target) },
+          insert_data: { kind: 'admin_ui.document_table', target_namespace: target, preferences: normalized, created_at: now, updated_at: now },
+          update_data: { preferences: normalized, updated_at: now },
+          max_docs: 1,
+          commit: true
+        }
+      });
+      setDocumentTablePreferences(normalized);
+      showToast('Table preferences saved');
+      return data;
+    });
   }
 
   async function loadNamespacePage(namespace, page = documentPage, pageSize = documentPageSize, opts = {}) {
@@ -442,7 +502,7 @@ export function DbCrudConsole() {
   function resetDocumentView() {
     if (!settings.namespace) return;
     setSelectedIds([]);
-    void loadNamespacePage(settings.namespace, 1, 25, { collapseRequest: true, sort: '_created_at desc', filter: {} });
+    void loadNamespacePage(settings.namespace, 1, 25, { collapseRequest: true, sort: documentTablePreferences.defaultSort, filter: {} });
   }
 
   function updateDatastoreQuery(patch) {
@@ -600,9 +660,11 @@ export function DbCrudConsole() {
 
   function openEditEntry(row) {
     const data = normalizeDocumentForEdit(row);
+    const originalNamespace = namespaceFromRow(row) || settings.namespace;
     setEntryModal({
       mode: 'edit',
-      namespace: namespaceFromRow(row) || settings.namespace,
+      namespace: originalNamespace,
+      originalNamespace,
       dataText: pretty(data),
       editorMode: 'ui',
       editorError: '',
@@ -672,6 +734,8 @@ export function DbCrudConsole() {
     const namespace = String(entryModal.namespace || settings.namespace || '').trim();
     if (!namespace) return showToast('Enter a namespace first', true);
     if (entryModal.editorError) return showToast(entryModal.editorError, true);
+    const originalNamespace = String(entryModal.originalNamespace || namespace).trim();
+    const movingNamespace = entryModal.mode === 'edit' && namespace !== originalNamespace;
 
     let request;
     if (entryModal.mode === 'create') {
@@ -700,7 +764,7 @@ export function DbCrudConsole() {
       request = {
         db: activeDb,
         operation: 'update',
-        namespace,
+        namespace: originalNamespace,
         payload: cleanPayload({
           _user_id: userFormValue(entryModal.userId),
           data,
@@ -730,14 +794,31 @@ export function DbCrudConsole() {
 
     await runStatusCall(async () => {
       const { data, durationMs } = await timedGateway(request);
-      setEntryModal(null);
       if (entryModal.dryRun) {
-        setResponse(data);
+        let dryRunData = data;
+        if (movingNamespace) {
+          const move = await gateway({
+            db: activeDb,
+            operation: 'change_namespace',
+            payload: { from_namespace: originalNamespace, to_namespace: namespace, ids: [entryModal.id], max_docs: 1, dry_run: true }
+          });
+          dryRunData = { status: 'success', data: { update: data, change_namespace: move } };
+        }
+        setEntryModal(null);
+        setResponse(dryRunData);
         setResponseDurationMs(durationMs);
         setLastOperation(request.operation);
-        return data;
+        return dryRunData;
       }
-      if (entryModal.mode === 'create') {
+      if (movingNamespace) {
+        await gateway({
+          db: activeDb,
+          operation: 'change_namespace',
+          payload: { from_namespace: originalNamespace, to_namespace: namespace, ids: [entryModal.id], max_docs: 1 }
+        });
+      }
+      setEntryModal(null);
+      if (entryModal.mode === 'create' || movingNamespace) {
         const addNamespace = (items) => items.some((item) => namespaceLabel(item) === namespace)
           ? items
           : [...items, { namespace, name: namespace }];
@@ -745,7 +826,8 @@ export function DbCrudConsole() {
         setActiveNamespaces(addNamespace);
       }
       const nextPage = entryModal.mode === 'create' ? 1 : documentPage;
-      await loadNamespacePage(namespace, nextPage, documentPageSize, { collapseRequest: true });
+      if (movingNamespace) await openNamespace(namespace);
+      else await loadNamespacePage(namespace, nextPage, documentPageSize, { collapseRequest: true });
       return data;
     });
   }
@@ -814,6 +896,16 @@ export function DbCrudConsole() {
     const [currentKey, currentDir = 'asc'] = String(documentSort || '').trim().split(/\s+/);
     const nextDir = currentKey === key && currentDir.toLowerCase() === 'asc' ? 'desc' : 'asc';
     void loadNamespacePage(settings.namespace, 1, documentPageSize, { collapseRequest: true, sort: `${key} ${nextDir}` });
+  }
+
+  async function runDocumentLifecycleOperation(operation, payload, namespace) {
+    if (!activeDb) return null;
+    return runStatusCall(async () => gateway(cleanPayload({
+      db: activeDb,
+      operation,
+      namespace: namespace || undefined,
+      payload
+    })));
   }
 
   function openRowDrawer(row) {
@@ -985,6 +1077,8 @@ export function DbCrudConsole() {
                     onReset={resetDocumentView}
                     onView={openRowDrawer}
                     onBatch={(action) => openBatchAction(action)}
+                    preferences={documentTablePreferences}
+                    onSavePreferences={saveDocumentTablePreferences}
                   />
                 ) : (
                   <ResponsePanel data={response} durationMs={responseDurationMs} />
@@ -1056,6 +1150,8 @@ export function DbCrudConsole() {
                     onReset={resetDocumentView}
                     onView={openRowDrawer}
                     onBatch={(action) => openBatchAction(action)}
+                    preferences={documentTablePreferences}
+                    onSavePreferences={saveDocumentTablePreferences}
                   />
                 ) : (
                   <ResponsePanel data={response} durationMs={responseDurationMs} />
@@ -1069,6 +1165,7 @@ export function DbCrudConsole() {
       {entryModal ? (
         <EntryModal
           modal={entryModal}
+          namespaces={activeNamespaces}
           onChange={updateEntryModal}
           onClose={() => setEntryModal(null)}
           onSubmit={submitEntryModal}
@@ -1106,6 +1203,20 @@ export function DbCrudConsole() {
             await navigator.clipboard.writeText(pretty(normalizeDocumentForDisplay(rowDrawer)));
             showToast('Document JSON copied');
           }}
+          onSetTtl={() => {
+            const row = rowDrawer;
+            const id = documentId(row);
+            setRowDrawer(null);
+            setBatchModal({
+              action: 'set_ttl',
+              ids: [id],
+              namespace: namespaceFromRow(row) || settings.namespace,
+              ttlSeconds: '3600',
+              expiryBehavior: String(row?._expiry_behavior || row?.data?._expiry_behavior || 'archive'),
+              dryRun: false
+            });
+          }}
+          onLifecycleOperation={runDocumentLifecycleOperation}
         />
       ) : null}
     </section>
@@ -2440,15 +2551,19 @@ function RequestHistory({ items, onUse, onClear }) {
   );
 }
 
-function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestText, page, pageSize, selectedIds, onSelectedIds, onPage, onPageSize, onSort, onRefresh, onReset, onView, onBatch }) {
-  const tableRows = rows.map((row) => flattenRow(normalizeDocumentForDisplay(row)));
-  const { rows: flattenedRows, keys } = rowColumns(tableRows);
-  const visibleKeys = prioritizeDocumentColumns(keys).slice(0, 18);
-  const [hiddenColumns, setHiddenColumns] = useState([]);
+function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestText, page, pageSize, selectedIds, onSelectedIds, onPage, onPageSize, onSort, onRefresh, onReset, onView, onBatch, preferences, onSavePreferences }) {
+  const [tablePreferences, setTablePreferences] = useState(() => normalizeDocumentTablePreferences(preferences));
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [jsonOpen, setJsonOpen] = useState(false);
-  const shownKeys = visibleKeys.filter((key) => !hiddenColumns.includes(key));
-  const hiddenCount = visibleKeys.length - shownKeys.length;
+  const [preferencesDirty, setPreferencesDirty] = useState(false);
+  const normalizedRows = rows.map(normalizeDocumentForDisplay);
+  const flattenedRows = tablePreferences.topLevelOnly
+    ? normalizedRows
+    : normalizedRows.map((row) => flattenDocumentForTable(row));
+  const keys = [...new Set(flattenedRows.flatMap((row) => Object.keys(row)))].slice(0, 60);
+  const orderedKeys = orderDocumentColumns(keys, tablePreferences.columnOrder);
+  const shownKeys = orderedKeys.filter((key) => key === '_id' || !tablePreferences.hiddenColumns.includes(key));
+  const hiddenCount = orderedKeys.length - shownKeys.length;
   const scrollKeys = shownKeys.filter((key) => key !== '_id');
   const [sortKey, sortDir = ''] = String(sort || '').trim().split(/\s+/);
   const filterSummary = summarizeRequestFilter(requestText);
@@ -2460,6 +2575,11 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
   const prevPage = pagination.prev_page || (page > 1 ? page - 1 : null);
   const allPageIds = rows.map(documentId).filter(Boolean);
   const allSelected = allPageIds.length > 0 && allPageIds.every((id) => selectedIds.includes(id));
+
+  useEffect(() => {
+    setTablePreferences(normalizeDocumentTablePreferences(preferences));
+    setPreferencesDirty(false);
+  }, [namespace, preferences]);
 
   function toggleAll(value) {
     if (!value) {
@@ -2477,7 +2597,25 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
 
   function toggleColumn(key) {
     if (key === '_id') return;
-    setHiddenColumns((prev) => prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key]);
+    updateTablePreferences({
+      hiddenColumns: tablePreferences.hiddenColumns.includes(key)
+        ? tablePreferences.hiddenColumns.filter((item) => item !== key)
+        : [...tablePreferences.hiddenColumns, key]
+    });
+  }
+
+  function updateTablePreferences(patch) {
+    setTablePreferences((current) => normalizeDocumentTablePreferences({ ...current, ...patch }));
+    setPreferencesDirty(true);
+  }
+
+  function moveColumn(key, direction) {
+    const order = [...orderedKeys];
+    const index = order.indexOf(key);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= order.length) return;
+    [order[index], order[nextIndex]] = [order[nextIndex], order[index]];
+    updateTablePreferences({ columnOrder: order });
   }
 
   async function copyResponseJson() {
@@ -2485,29 +2623,37 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
   }
 
   return (
-    <section className="panel">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+    <section className="document-table-panel">
+      <div className="document-table-toolbar">
         <div>
-          <h3 className="text-sm font-semibold text-slate-950">Documents</h3>
-          <p className="text-xs text-slate-500">
-            {rows.length ? `${rows.length} item${rows.length === 1 ? '' : 's'} from the latest response.` : 'Run a query or select a namespace to load documents.'}
-            {durationMs !== null && durationMs !== undefined ? <span className="ml-2 font-mono text-emerald-700">Completed in {formatDuration(durationMs)}</span> : null}
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-base font-bold text-slate-950">Documents</h3>
+            {rows.length ? <span className="document-table-count">{rows.length}</span> : null}
+          </div>
+          <p className="mt-0.5 text-xs text-slate-600">{rows.length ? 'Results from the latest query.' : 'Run a query or select a namespace to load documents.'}{durationMs !== null && durationMs !== undefined ? <span className="ml-2 font-mono text-emerald-700">{formatDuration(durationMs)}</span> : null}</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button onClick={onReset} disabled={!namespace} className="btn-panel-menu">Reset view</button>
-          <button onClick={onRefresh} disabled={!response} className="btn-panel-menu">Refresh</button>
-          <button onClick={() => setColumnsOpen((value) => !value)} disabled={!visibleKeys.length} className="btn-panel-menu">Columns{hiddenCount ? ` (${hiddenCount} hidden)` : ''}</button>
-          <button onClick={() => setJsonOpen((value) => !value)} disabled={!response} className="btn-panel-menu">{jsonOpen ? 'Hide JSON' : 'JSON View'}</button>
-          <button onClick={copyResponseJson} disabled={!response} className="btn-panel-menu">Copy JSON</button>
-          <select onChange={(e) => e.target.value ? onBatch(e.target.value) : null} value="" disabled={!selectedIds.length} className="btn-panel-menu">
-            <option value="">Bulk action</option>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="document-table-control-group">
+            <button onClick={onRefresh} disabled={!response} className="document-table-control">Refresh</button>
+            <button onClick={onReset} disabled={!namespace} className="document-table-control">Reset</button>
+          </div>
+          <div className="document-table-control-group">
+            <button onClick={() => setColumnsOpen((value) => !value)} disabled={!orderedKeys.length} className={`document-table-control ${columnsOpen ? 'document-table-control-active' : ''}`}>Columns{hiddenCount ? ` · ${hiddenCount}` : ''}</button>
+            <button onClick={() => updateTablePreferences({ topLevelOnly: !tablePreferences.topLevelOnly })} disabled={!rows.length} className={`document-table-control ${tablePreferences.topLevelOnly ? 'document-table-control-active' : ''}`}>{tablePreferences.topLevelOnly ? 'Top Level' : 'Dot Paths'}</button>
+            {preferencesDirty ? <button type="button" onClick={() => onSavePreferences(tablePreferences)} disabled={namespace === SYSTEM_SETTINGS_NAMESPACE} className="document-table-control document-table-control-save">Save View</button> : null}
+          </div>
+          <div className="document-table-control-group">
+            <button onClick={() => setJsonOpen((value) => !value)} disabled={!response} className={`document-table-control ${jsonOpen ? 'document-table-control-active' : ''}`}>JSON</button>
+            <button onClick={copyResponseJson} disabled={!response} className="document-table-control">Copy</button>
+          </div>
+          <select onChange={(e) => e.target.value ? onBatch(e.target.value) : null} value="" disabled={!selectedIds.length} className="document-table-select">
+            <option value="">{selectedIds.length ? `${selectedIds.length} selected` : 'Bulk Actions'}</option>
             <option value="delete">Delete selected</option>
             <option value="set_ttl">Set TTL</option>
             <option value="purge">Purge selected</option>
           </select>
-          <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold outline-none">
-            {[10, 25, 50, 100, 250].map((size) => <option key={size} value={size}>{size} / page</option>)}
+          <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))} className="document-table-select">
+            {[10, 25, 50, 100, 250].map((size) => <option key={size} value={size}>{size} rows</option>)}
           </select>
         </div>
       </div>
@@ -2522,15 +2668,32 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
         userScope={userScope}
       />
       {columnsOpen ? (
-        <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
-          <div className="flex flex-wrap gap-2">
-            {visibleKeys.map((key) => (
-              <label key={key} className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-semibold ${hiddenColumns.includes(key) ? 'border-slate-200 bg-white text-slate-400' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
-                <input type="checkbox" checked={!hiddenColumns.includes(key)} disabled={key === '_id'} onChange={() => toggleColumn(key)} />
-                {key}
+        <div className="border-b border-slate-200 bg-slate-50 px-4 py-4">
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-bold text-slate-950">Table Settings</h4>
+              <p className="text-xs text-slate-600">Choose fields, reorder columns, select nested-field mode, and save the default sort for this namespace.</p>
+            </div>
+            <div className="flex flex-wrap items-end gap-2">
+              <label>
+                <span className="field-label">Default Sort</span>
+                <input value={tablePreferences.defaultSort} onChange={(event) => updateTablePreferences({ defaultSort: event.target.value })} placeholder="_created_at desc" className="mini-input min-w-56" />
               </label>
+              <button type="button" onClick={() => updateTablePreferences({ defaultSort: sort || '_created_at desc' })} className="btn-secondary">Use Current Sort</button>
+              <button type="button" onClick={() => onSavePreferences(tablePreferences)} disabled={!preferencesDirty || namespace === SYSTEM_SETTINGS_NAMESPACE} className="btn-primary">Save Settings</button>
+            </div>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {orderedKeys.map((key, index) => (
+              <div key={key} className={`flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2 ${tablePreferences.hiddenColumns.includes(key) ? 'border-slate-200 bg-white text-slate-500' : 'border-slate-300 bg-white text-slate-900'}`}>
+                <input type="checkbox" checked={!tablePreferences.hiddenColumns.includes(key)} disabled={key === '_id'} onChange={() => toggleColumn(key)} aria-label={`Show ${key}`} />
+                <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold" title={key}>{key}</span>
+                <button type="button" onClick={() => moveColumn(key, -1)} disabled={index === 0} className="btn-label" aria-label={`Move ${key} left`}>←</button>
+                <button type="button" onClick={() => moveColumn(key, 1)} disabled={index === orderedKeys.length - 1} className="btn-label" aria-label={`Move ${key} right`}>→</button>
+              </div>
             ))}
           </div>
+          {namespace === SYSTEM_SETTINGS_NAMESPACE ? <p className="mt-3 text-xs font-semibold text-amber-700">Table preferences are not persisted while browsing the reserved {SYSTEM_SETTINGS_NAMESPACE} namespace.</p> : null}
         </div>
       ) : null}
       {jsonOpen ? (
@@ -2538,18 +2701,18 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
           <JsonEditor value={pretty(response || {})} onChange={() => {}} minHeight="220px" readOnly />
         </div>
       ) : null}
-      <div className="max-w-full overflow-x-auto overflow-y-auto p-4">
+      <div className="document-table-viewport">
         {rows.length ? (
-          <table className="w-max min-w-[1180px] border-separate border-spacing-0 text-sm">
+          <table className="document-table-grid">
             <thead>
               <tr>
-                <th className="sticky left-0 top-0 z-30 w-[52px] border-b border-r border-slate-300 bg-slate-100 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">#</th>
-                <th className="sticky left-[52px] top-0 z-30 w-[44px] border-b border-r border-slate-300 bg-slate-100 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-600"><input type="checkbox" checked={allSelected} onChange={(e) => toggleAll(e.target.checked)} /></th>
-                <th className="sticky left-[96px] top-0 z-30 w-[280px] border-b border-r border-slate-300 bg-slate-100 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                <th className="document-table-head document-table-head-number">#</th>
+                <th className="document-table-head document-table-head-check"><input type="checkbox" checked={allSelected} onChange={(e) => toggleAll(e.target.checked)} aria-label="Select all rows on this page" /></th>
+                <th className="document-table-head document-table-head-id">
                   <SortHeader label="_id" active={sortKey === '_id'} dir={sortDir} onClick={() => onSort('_id')} />
                 </th>
-                {scrollKeys.map((key) => <th key={key} className="sticky top-0 z-20 min-w-[180px] border-b border-slate-300 bg-slate-100 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-600"><SortHeader label={key} active={sortKey === key} dir={sortDir} onClick={() => onSort(key)} /></th>)}
-                <th className="sticky right-0 top-0 z-30 w-[96px] border-b border-l border-slate-300 bg-slate-100 px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide text-slate-600">actions</th>
+                {scrollKeys.map((key) => <th key={key} className="document-table-head document-table-head-scroll"><SortHeader label={key} active={sortKey === key} dir={sortDir} onClick={() => onSort(key)} /></th>)}
+                <th className="document-table-head document-table-head-actions">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -2557,14 +2720,20 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
                 const flat = flattenedRows[idx] || {};
                 const id = documentId(row);
                 return (
-                  <tr key={`${documentId(row) || idx}-${idx}`} className="odd:bg-white even:bg-slate-50">
-                    <td className="sticky left-0 z-10 w-[52px] border-b border-r border-slate-200 bg-inherit px-3 py-2 font-mono text-xs text-slate-500">{(page - 1) * pageSize + idx + 1}</td>
-                    <td className="sticky left-[52px] z-10 w-[44px] border-b border-r border-slate-200 bg-inherit px-3 py-2"><input type="checkbox" checked={selectedIds.includes(id)} disabled={!id} onChange={(e) => toggleOne(id, e.target.checked)} /></td>
-                    <td className="sticky left-[96px] z-10 w-[280px] max-w-[280px] truncate border-b border-r border-slate-200 bg-inherit px-3 py-2 align-top font-mono text-xs font-semibold text-slate-900" title={String(id || flat._id || '')}>{truncateMiddle(formatCell(id || flat._id), 10, 8)}</td>
-                    {scrollKeys.map((key) => <td key={key} className="max-w-[260px] truncate border-b border-slate-200 px-3 py-2 align-top font-mono text-xs text-slate-800">{formatCell(flat[key])}</td>)}
-                    <td className="sticky right-0 z-10 w-[96px] border-b border-l border-slate-200 bg-inherit px-3 py-2 text-right">
+                  <tr key={`${documentId(row) || idx}-${idx}`} className={`document-table-row ${selectedIds.includes(id) ? 'document-table-row-selected' : ''}`}>
+                    <td className="document-table-cell document-table-cell-number">{(page - 1) * pageSize + idx + 1}</td>
+                    <td className="document-table-cell document-table-cell-check"><input type="checkbox" checked={selectedIds.includes(id)} disabled={!id} onChange={(e) => toggleOne(id, e.target.checked)} aria-label={`Select document ${id}`} /></td>
+                    <td className="document-table-cell document-table-cell-id">
+                      <DocumentIdValue value={id || flat._id} onView={() => onView(row)} />
+                    </td>
+                    {scrollKeys.map((key) => (
+                      <td key={key} className="document-table-cell document-table-cell-value">
+                        <DocumentTableValue value={flat[key]} />
+                      </td>
+                    ))}
+                    <td className="document-table-cell document-table-cell-actions">
                       <div className="flex flex-nowrap justify-end gap-2">
-                        <button onClick={() => onView(row)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold hover:border-slate-500">View</button>
+                        <button onClick={() => onView(row)} className="document-table-view-button">View</button>
                       </div>
                     </td>
                   </tr>
@@ -2576,18 +2745,127 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
           <EmptyCards message={response ? 'No documents matched this query. Try changing the filter, sort, or namespace.' : 'Select a namespace or run a query to load documents here.'} />
         )}
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 text-xs text-slate-600">
-        <div>
-          Showing page <span className="font-mono font-semibold text-slate-900">{page}</span> of <span className="font-mono font-semibold text-slate-900">{totalPages}</span>
-          <span className="ml-2">Total {formatNumber(totalItems)}</span>
-          {selectedIds.length ? <span className="ml-2 font-semibold text-slate-900">{selectedIds.length} selected</span> : null}
+      <div className="document-table-footer">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span>Page <strong className="font-mono text-slate-950">{page}</strong> of <strong className="font-mono text-slate-950">{totalPages}</strong></span>
+          <span><strong className="font-mono text-slate-950">{formatNumber(totalItems)}</strong> total</span>
+          {selectedIds.length ? <span className="font-semibold text-primary">{selectedIds.length} selected</span> : null}
         </div>
         <div className="flex gap-2">
-          <button onClick={() => prevPage ? onPage(prevPage) : null} disabled={!prevPage} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-50">Prev</button>
-          <button onClick={() => nextPage ? onPage(nextPage) : null} disabled={!nextPage && page >= totalPages} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-50">Next</button>
+          <button onClick={() => prevPage ? onPage(prevPage) : null} disabled={!prevPage} className="btn-secondary">Previous</button>
+          <button onClick={() => nextPage ? onPage(nextPage) : null} disabled={!nextPage && page >= totalPages} className="btn-secondary">Next</button>
         </div>
       </div>
     </section>
+  );
+}
+
+function DocumentIdValue({ value, onView }) {
+  const [copied, setCopied] = useState(false);
+  const text = formatCell(value);
+
+  async function copy() {
+    if (!text) return;
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }
+
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span onDoubleClick={copy} className="min-w-0 flex-1 cursor-copy truncate" title={`${text}\nDouble-click to copy`}>{truncateMiddle(text, 10, 8)}</span>
+      {copied ? <span className="shrink-0 font-sans text-[10px] font-semibold text-emerald-700">Copied</span> : null}
+      <button type="button" onClick={onView} className="shrink-0 rounded border border-slate-200 bg-white px-1.5 py-0.5 font-sans text-[10px] font-medium text-slate-500 hover:border-slate-300 hover:text-slate-800">View</button>
+    </div>
+  );
+}
+
+function DocumentTableValue({ value }) {
+  const [expanded, setExpanded] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const structured = value !== null && typeof value === 'object';
+
+  async function copyValue() {
+    const content = structured ? pretty(value) : formatCell(value);
+    await navigator.clipboard.writeText(content);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }
+
+  if (structured) {
+    const array = Array.isArray(value);
+    const count = array ? value.length : Object.keys(value).length;
+    const treeValue = array ? { value } : value;
+    return (
+      <div className="relative min-w-[150px] max-w-[280px]">
+        <button type="button" onClick={() => setExpanded((current) => !current)} className="inline-flex items-center gap-1.5 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-sans text-[11px] font-medium text-slate-500 hover:border-slate-300 hover:bg-white hover:text-slate-700">
+          <span>{expanded ? '⌄' : '›'}</span>
+          <span>[{array ? 'Array' : 'Object'}]</span>
+          <span className="text-slate-400">{count}</span>
+        </button>
+        {expanded ? (
+          <div className="relative z-0 mt-2 max-h-64 w-full max-w-[280px] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+            <DocumentUiEditor value={pretty(treeValue)} readOnly />
+            <div className="sticky bottom-0 mt-2 flex items-center gap-2 bg-slate-50 py-1 font-sans">
+              <button type="button" onClick={() => setModalOpen(true)} className="text-xs font-semibold text-primary">Open Full Value</button>
+              <button type="button" onClick={copyValue} className="text-xs font-semibold text-slate-600">Copy</button>
+              {copied ? <span className="text-[10px] font-semibold text-emerald-700">Copied</span> : null}
+            </div>
+          </div>
+        ) : null}
+        {modalOpen ? <DocumentValueModal value={value} onClose={() => setModalOpen(false)} /> : null}
+      </div>
+    );
+  }
+
+  const text = formatCell(value);
+  const long = text.length > 120 || text.includes('\n');
+  const visible = expanded ? text.slice(0, 1200) : text.slice(0, 120);
+  return (
+    <div className="min-w-[150px] max-w-[300px]">
+      <div onDoubleClick={copyValue} className={`${expanded ? 'max-h-32 overflow-auto whitespace-pre-wrap break-words' : 'truncate'} cursor-copy`} title={`${long && !expanded ? text : ''}${long && !expanded ? '\n' : ''}Double-click to copy`}>
+        {visible}{text.length > visible.length ? '…' : ''}
+      </div>
+      {long ? (
+        <div className="mt-1 flex gap-2 font-sans">
+          <button type="button" onClick={() => setExpanded((current) => !current)} className="text-xs font-semibold text-primary">{expanded ? 'Collapse' : 'Expand'}</button>
+          {expanded && text.length > 1200 ? <button type="button" onClick={() => setModalOpen(true)} className="text-xs font-semibold text-primary">View Full</button> : null}
+          {copied ? <span className="text-[10px] font-semibold text-emerald-700">Copied</span> : null}
+        </div>
+      ) : null}
+      {!long && copied ? <div className="mt-1 font-sans text-[10px] font-semibold text-emerald-700">Copied</div> : null}
+      {modalOpen ? <DocumentValueModal value={value} onClose={() => setModalOpen(false)} /> : null}
+    </div>
+  );
+}
+
+function DocumentValueModal({ value, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const content = value !== null && typeof value === 'object' ? pretty(value) : String(value ?? 'null');
+  async function copy() {
+    await navigator.clipboard.writeText(content);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }
+  return createPortal(
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-label="Full document value">
+      <div className="flex max-h-[88vh] w-full max-w-5xl flex-col rounded-xl border border-slate-300 bg-white">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+          <div>
+            <h3 className="text-base font-bold text-slate-950">Full Value</h3>
+            <p className="text-xs text-slate-600">Complete untruncated field content.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {copied ? <span className="text-xs font-semibold text-emerald-700">Copied</span> : null}
+            <button type="button" onClick={copy} className="btn-secondary">Copy Value</button>
+            <button type="button" onClick={onClose} className="btn-secondary">Close</button>
+          </div>
+        </div>
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-sm text-slate-800">{content}</pre>
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2623,12 +2901,17 @@ function SortHeader({ label, active, dir, onClick }) {
   );
 }
 
-function EntryModal({ modal, onChange, onClose, onSubmit }) {
+function EntryModal({ modal, namespaces = [], onChange, onClose, onSubmit }) {
   const title = modal.mode === 'create' ? 'Create Entry' : modal.mode === 'edit' ? 'Edit Entry' : modal.mode === 'delete' ? 'Delete Entry' : 'View Entry';
   const readonly = modal.mode === 'view' || modal.mode === 'delete';
   const namespaceReadOnly = modal.mode !== 'create' || !modal.useCustomNamespace;
   const canSwitchEditor = modal.mode === 'create' || modal.mode === 'edit';
   const editorMode = canSwitchEditor ? (modal.editorMode || 'json') : 'json';
+  const namespaceOptions = [...new Set([
+    ...namespaces.map(namespaceLabel).filter(Boolean),
+    modal.originalNamespace,
+    !modal.useCustomNamespace ? modal.namespace : ''
+  ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
       <div className="max-h-[94vh] w-full max-w-6xl overflow-auto rounded-2xl border border-slate-300 bg-white">
@@ -2646,7 +2929,30 @@ function EntryModal({ modal, onChange, onClose, onSubmit }) {
             <p className="mt-0.5 text-xs text-slate-500">These options control where and how the document is stored. They are not written into the JSON body.</p>
           </div>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <Field label="Namespace" value={modal.namespace || ''} onChange={(v) => onChange({ namespace: v })} placeholder="users, products, events..." readOnly={namespaceReadOnly} />
+            {modal.mode === 'edit' ? (
+              <label className="block">
+                <span className="field-label">Destination Namespace</span>
+                <select
+                  value={modal.useCustomNamespace ? '__new_namespace__' : modal.namespace || modal.originalNamespace || ''}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    onChange(value === '__new_namespace__'
+                      ? { useCustomNamespace: true, namespace: '' }
+                      : { useCustomNamespace: false, namespace: value });
+                  }}
+                  className="field-input"
+                >
+                  {namespaceOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                  <option value="__new_namespace__">Create New Namespace...</option>
+                </select>
+                <span className="mt-1 block text-xs text-slate-500">Current: <code>{modal.originalNamespace || 'unknown'}</code></span>
+              </label>
+            ) : (
+              <Field label="Namespace" value={modal.namespace || ''} onChange={(v) => onChange({ namespace: v })} placeholder="users, products, events..." readOnly={namespaceReadOnly} />
+            )}
+            {modal.mode === 'edit' && modal.useCustomNamespace ? (
+              <Field label="New Namespace" value={modal.namespace || ''} onChange={(namespace) => onChange({ namespace })} placeholder="users_archive, tenant/new..." />
+            ) : null}
             {modal.mode === 'create' && modal.defaultNamespace ? (
               <CheckboxField
                 label="Use Different Namespace"
@@ -2731,13 +3037,74 @@ function EntryModal({ modal, onChange, onClose, onSubmit }) {
   );
 }
 
-function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson }) {
-  const [viewMode, setViewMode] = useState('ui');
+function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson, onSetTtl, onLifecycleOperation }) {
+  const [viewMode, setViewMode] = useState('tree');
+  const [transitions, setTransitions] = useState([]);
+  const [lifecycleLoading, setLifecycleLoading] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState('');
+  const [transitionForm, setTransitionForm] = useState({
+    name: '',
+    timing: 'after',
+    afterSeconds: '3600',
+    at: '',
+    whenText: '{}',
+    updateText: '{\n  "status": "expired"\n}',
+    ttlSeconds: '',
+    expiryBehavior: 'archive'
+  });
   const id = documentId(row);
   const namespace = namespaceFromRow(row);
   const userId = documentUserId(row);
   const document = normalizeDocumentForDisplay(row);
   const documentText = pretty(document);
+  const expiresAt = String(row?._expires_at || row?.data?._expires_at || document?._expires_at || '');
+  const expiryBehavior = String(row?._expiry_behavior || row?.data?._expiry_behavior || document?._expiry_behavior || 'archive');
+
+  useEffect(() => {
+    if (viewMode === 'lifecycle') void loadTransitions();
+  }, [viewMode, id]);
+
+  async function loadTransitions() {
+    if (!id) return;
+    setLifecycleLoading(true);
+    setLifecycleError('');
+    const data = await onLifecycleOperation('list_transitions', { document_id: id, page: 1, per_page: 100 }, namespace);
+    if (data) setTransitions(bestRows(data));
+    else setLifecycleError('Unable to load lifecycle transitions.');
+    setLifecycleLoading(false);
+  }
+
+  async function scheduleTransition() {
+    const [when, whenError] = tryParseJson(transitionForm.whenText || '{}');
+    const [update, updateError] = tryParseJson(transitionForm.updateText || '{}');
+    if (!transitionForm.name.trim()) return setLifecycleError('Transition name is required.');
+    if (whenError) return setLifecycleError(`Invalid condition JSON: ${whenError.message}`);
+    if (updateError || !update || typeof update !== 'object' || Array.isArray(update) || !Object.keys(update).length) return setLifecycleError('Update must be a non-empty JSON object.');
+    const payload = cleanPayload({
+      document_id: id,
+      name: transitionForm.name.trim(),
+      after_seconds: transitionForm.timing === 'after' ? parseOptionalInt(transitionForm.afterSeconds) : undefined,
+      at: transitionForm.timing === 'at' ? transitionForm.at || undefined : undefined,
+      when,
+      update,
+      ttl_seconds: parseOptionalInt(transitionForm.ttlSeconds),
+      expiry_behavior: transitionForm.ttlSeconds ? transitionForm.expiryBehavior : undefined
+    });
+    if (!payload.after_seconds && !payload.at) return setLifecycleError('Choose a valid execution time.');
+    setLifecycleError('');
+    const data = await onLifecycleOperation('schedule_transition', payload, namespace);
+    if (data) {
+      setTransitionForm((current) => ({ ...current, name: '' }));
+      await loadTransitions();
+    }
+  }
+
+  async function changeTransition(operation, transition) {
+    const transitionId = transition.transition_id || transition.id;
+    if (!transitionId) return;
+    const data = await onLifecycleOperation(operation, { transition_id: transitionId }, namespace);
+    if (data) await loadTransitions();
+  }
   return (
     <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-5xl flex-col border-l border-slate-300 bg-white">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
@@ -2751,27 +3118,142 @@ function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson }) {
         <div className="flex flex-wrap gap-2">
           <button onClick={onEdit} className="btn-primary">Edit</button>
           <button onClick={onDelete} className="btn-danger">Delete</button>
+          <button onClick={onSetTtl} disabled={!id} className="btn-secondary">Manage TTL</button>
           <button onClick={onCopyId} disabled={!id} className="btn-secondary disabled:cursor-not-allowed disabled:opacity-50">Copy _id</button>
           <button onClick={onCopyJson} className="btn-secondary">Copy JSON</button>
         </div>
         <div className="flex gap-1 rounded-lg bg-slate-100 p-1" aria-label="Document detail view">
-          <button type="button" onClick={() => setViewMode('ui')} className={`btn-tab ${viewMode === 'ui' ? 'btn-tab-active' : 'btn-tab-idle'}`}>UI View</button>
+          <button type="button" onClick={() => setViewMode('tree')} className={`btn-tab ${viewMode === 'tree' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Tree View</button>
           <button type="button" onClick={() => setViewMode('json')} className={`btn-tab ${viewMode === 'json' ? 'btn-tab-active' : 'btn-tab-idle'}`}>JSON View</button>
+          <button type="button" onClick={() => setViewMode('lifecycle')} className={`btn-tab ${viewMode === 'lifecycle' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Lifecycle</button>
         </div>
       </div>
-      <div className="grid gap-2 border-b border-slate-200 bg-slate-50 px-5 py-3 text-xs md:grid-cols-3">
+      <div className="grid gap-2 border-b border-slate-200 bg-slate-50 px-5 py-3 text-xs md:grid-cols-5">
         <ContextPill label="_id" value={id || 'n/a'} mono />
         <ContextPill label="_user_id" value={userId || 'none'} mono tone={userId ? 'selected' : 'default'} />
         <ContextPill label="Namespace" value={namespace || 'n/a'} mono />
+        <ContextPill label="Expires" value={expiresAt || 'No TTL'} mono tone={expiresAt ? 'selected' : 'default'} />
+        <ContextPill label="On Expiry" value={expiryBehavior} />
       </div>
       <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-5">
-        {viewMode === 'ui' ? (
+        {viewMode === 'tree' ? (
           <DocumentUiEditor key={`detail:${id || 'document'}`} value={documentText} readOnly />
-        ) : (
+        ) : viewMode === 'json' ? (
           <JsonEditor value={documentText} onChange={() => {}} minHeight="520px" readOnly />
+        ) : (
+          <DocumentLifecyclePanel
+            expiresAt={expiresAt}
+            expiryBehavior={expiryBehavior}
+            transitions={transitions}
+            loading={lifecycleLoading}
+            error={lifecycleError}
+            form={transitionForm}
+            onForm={(patch) => setTransitionForm((current) => ({ ...current, ...patch }))}
+            onSetTtl={onSetTtl}
+            onRefresh={loadTransitions}
+            onSchedule={scheduleTransition}
+            onCancel={(transition) => changeTransition('cancel_transition', transition)}
+            onRetry={(transition) => changeTransition('retry_transition', transition)}
+          />
         )}
       </div>
     </div>
+  );
+}
+
+function DocumentLifecyclePanel({ expiresAt, expiryBehavior, transitions, loading, error, form, onForm, onSetTtl, onRefresh, onSchedule, onCancel, onRetry }) {
+  return (
+    <section className="space-y-4">
+      <section className="panel">
+        <div className="panel-header-row">
+          <div>
+            <h3 className="text-sm font-bold text-slate-950">TTL Lifecycle</h3>
+            <p className="text-xs text-slate-600">TTL archives or permanently deletes the document when its expiration time is reached.</p>
+          </div>
+          <button type="button" onClick={onSetTtl} className="btn-primary">Set Or Clear TTL</button>
+        </div>
+        <div className="grid gap-3 p-4 sm:grid-cols-2">
+          <MiniMeta label="Expires At" value={expiresAt || 'No TTL configured'} />
+          <MiniMeta label="Expiry Behavior" value={expiryBehavior || 'archive'} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h3 className="text-sm font-bold text-slate-950">Schedule Transition</h3>
+          <p className="text-xs text-slate-600">Apply a named conditional document mutation at a future time.</p>
+        </div>
+        <div className="space-y-4 p-4">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <Field label="Name" value={form.name} onChange={(name) => onForm({ name })} placeholder="expire_invitation" />
+            <label>
+              <span className="field-label">Timing</span>
+              <select value={form.timing} onChange={(event) => onForm({ timing: event.target.value })} className="field-input">
+                <option value="after">After Seconds</option>
+                <option value="at">At Date/Time</option>
+              </select>
+            </label>
+            {form.timing === 'after'
+              ? <Field label="After Seconds" value={form.afterSeconds} onChange={(afterSeconds) => onForm({ afterSeconds })} placeholder="3600" />
+              : <Field label="Execute At" value={form.at} onChange={(at) => onForm({ at })} placeholder="2026-08-20T14:00:00Z" />}
+            <Field label="TTL After Transition" value={form.ttlSeconds} onChange={(ttlSeconds) => onForm({ ttlSeconds })} placeholder="optional seconds; 0 clears" />
+          </div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <label>
+              <span className="field-label">When (Filter Operators)</span>
+              <JsonEditor value={form.whenText} onChange={(whenText) => onForm({ whenText })} minHeight="160px" />
+            </label>
+            <label>
+              <span className="field-label">Update</span>
+              <JsonEditor value={form.updateText} onChange={(updateText) => onForm({ updateText })} minHeight="160px" />
+            </label>
+          </div>
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <label className="min-w-52">
+              <span className="field-label">Expiry Behavior</span>
+              <select value={form.expiryBehavior} onChange={(event) => onForm({ expiryBehavior: event.target.value })} disabled={!form.ttlSeconds} className="field-input">
+                <option value="archive">Archive</option>
+                <option value="delete">Delete</option>
+              </select>
+            </label>
+            <button type="button" onClick={onSchedule} className="btn-primary">Schedule Transition</button>
+          </div>
+          {error ? <p className="text-sm font-semibold text-rose-700">{error}</p> : null}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header-row">
+          <div>
+            <h3 className="text-sm font-bold text-slate-950">Transition History</h3>
+            <p className="text-xs text-slate-600">Pending, completed, skipped, cancelled, and failed transitions remain visible.</p>
+          </div>
+          <button type="button" onClick={onRefresh} disabled={loading} className="btn-secondary">{loading ? 'Loading...' : 'Refresh'}</button>
+        </div>
+        {transitions.length ? (
+          <div className="overflow-x-auto">
+            <table className="data-grid min-w-[880px]">
+              <thead><tr><th className="data-grid-head">Name</th><th className="data-grid-head">Execute At</th><th className="data-grid-head">Status</th><th className="data-grid-head">Attempts</th><th className="data-grid-head">TTL</th><th className="data-grid-head text-right">Actions</th></tr></thead>
+              <tbody>
+                {transitions.map((transition, index) => (
+                  <tr key={transition.transition_id || transition.id || index}>
+                    <td className="data-grid-cell font-semibold">{transition.name || 'unnamed'}</td>
+                    <td className="data-grid-cell">{transition.execute_at || transition.at || 'n/a'}</td>
+                    <td className="data-grid-cell"><span className="badge badge-muted">{transition.status || 'unknown'}</span></td>
+                    <td className="data-grid-cell">{transition.attempts ?? 0}</td>
+                    <td className="data-grid-cell">{transition.ttl_seconds ?? 'none'}</td>
+                    <td className="data-grid-cell text-right">
+                      {transition.status === 'pending' ? <button type="button" onClick={() => onCancel(transition)} className="btn-label">Cancel</button> : null}
+                      {transition.status === 'failed' ? <button type="button" onClick={() => onRetry(transition)} className="btn-label-secondary">Retry</button> : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <div className="p-4"><EmptyCards message={loading ? 'Loading transitions...' : 'No lifecycle transitions have been scheduled for this document.'} /></div>}
+      </section>
+    </section>
   );
 }
 
@@ -2780,7 +3262,7 @@ function BatchActionModal({ modal, onChange, onClose, onSubmit }) {
   const submitLabel = modal.action === 'set_ttl' ? 'Set TTL' : modal.action === 'purge' ? 'Purge documents' : 'Delete documents';
   const danger = modal.action === 'purge' || modal.action === 'delete';
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 p-4">
       <div className="w-full max-w-xl rounded-2xl border border-slate-300 bg-white">
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div>
@@ -5377,6 +5859,40 @@ function normalizeDocumentForEdit(row) {
   delete out.namespace;
   delete out._user_id;
   return out;
+}
+
+function flattenDocumentForTable(value, prefix = '', out = {}) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    out[prefix || 'value'] = value;
+    return out;
+  }
+  Object.entries(value).forEach(([key, child]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (child && typeof child === 'object' && !Array.isArray(child)) flattenDocumentForTable(child, path, out);
+    else out[path] = child;
+  });
+  return out;
+}
+
+function documentTablePreferenceId(namespace) {
+  return `admin_ui:document_table:${String(namespace || '').trim()}`;
+}
+
+function normalizeDocumentTablePreferences(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return {
+    columnOrder: Array.isArray(source.columnOrder) ? source.columnOrder.map(String) : [],
+    hiddenColumns: Array.isArray(source.hiddenColumns) ? source.hiddenColumns.map(String).filter((key) => key !== '_id') : [],
+    topLevelOnly: source.topLevelOnly === true,
+    defaultSort: String(source.defaultSort || '_created_at desc').trim() || '_created_at desc'
+  };
+}
+
+function orderDocumentColumns(keys, preferredOrder) {
+  const prioritized = prioritizeDocumentColumns(keys);
+  const available = new Set(prioritized);
+  const saved = (preferredOrder || []).filter((key) => available.has(key));
+  return [...saved, ...prioritized.filter((key) => !saved.includes(key))];
 }
 
 function prioritizeDocumentColumns(keys) {

@@ -1,10 +1,10 @@
-# Kongo
+# KiDB
 
-## Hybrid Database Toolkit
+> KiDB = Kongo Index Database
 
-Kongo is a lightweight, self-hosted data platform that combines the flexibility of a document database with the power of SQLite. It provides a consistent JSON API for document storage, direct SQL access, identity records, file metadata, metrics, audit logs, full-text search, and database administration.
+**KiDB** is a lightweight, self-hosted data platform that combines the flexibility of a document database with the power of SQLite. It provides one consistent JSON API for document storage, direct SQL access, identity records, file metadata, metrics, audit logs, full-text search, and database administration.
 
-Built in Rust on SQLite/libSQL, Kongo is designed for applications that need a capable embedded or standalone data service without operating a large database stack. It runs locally, in Docker, or with S3-backed storage.
+Built in Rust on SQLite/libSQL, KiDB is designed for applications that need a capable embedded or standalone data service without operating a large database stack. It runs locally, in Docker, or with S3-backed storage — and it's exposed as a single RPC-style HTTP endpoint: JSON in, JSON out.
 
 ### Main Features
 
@@ -15,7 +15,7 @@ Built in Rust on SQLite/libSQL, Kongo is designed for applications that need a c
   Insert, update, delete, query, aggregate, upsert, paginate, project fields, sort, filter, join related documents, and manage TTL-based expiration.
 
 - **SQLite Interface**
-  Create and inspect user tables, execute parameterized SQL, browse records, and use supported DDL without exposing Kongo's internal tables.
+  Create and inspect user tables, execute parameterized SQL, browse records, and use supported DDL without exposing KiDB's internal tables.
 
 - **Local and S3 Storage**
   Run entirely from local disk or use S3-compatible object storage with local hydration, WAL replication, snapshots, synchronization, and safe recovery.
@@ -60,14 +60,14 @@ Built in Rust on SQLite/libSQL, Kongo is designed for applications that need a c
   Maintain cross-database inventory, lifecycle events, historical database statistics, active connection state, process memory, request counts, latency, and rolling instance metrics.
 
 - **Built-In Admin Interface**
-  Manage multiple Kongo connections and databases through a React interface for DocumentDB, SQLiteDB, Identity, Files, Metrics, Search, Audit Logs, jobs, backups, and system monitoring.
+  Manage multiple KiDB connections and databases through a React interface for DocumentDB, SQLiteDB, Identity, Files, Metrics, Search, Audit Logs, jobs, backups, and system monitoring.
 
 - **Simple Security Model**
   Protect API, documentation, and administration routes with an access key, while supporting an explicit no-auth mode for trusted local development.
 
 ### Deployment Model
 
-Kongo can operate as:
+KiDB can operate as:
 
 - An embedded local database service
 - A self-hosted Docker application with persistent volumes
@@ -75,13 +75,13 @@ Kongo can operate as:
 - A lightweight database gateway for SaaS applications
 - A development and administration layer over SQLite data
 
-Kongo's goal is to provide one compact service for common application data needs while preserving SQLite's portability, reliability, and direct SQL capabilities.
+KiDB's goal is to provide one compact service for common application data needs while preserving SQLite's portability, reliability, and direct SQL capabilities.
 
 ## API Surface
 This section describes the public HTTP routes and the access rules around them.
 
 ### Endpoints
-These are the HTTP endpoints exposed by Kongo under the configured base path.
+These are the HTTP endpoints exposed by KiDB under the configured base path.
 - `POST ${KONGODB_BASE_PATH}/gateway` (default `/_/kdb/gateway`): all operations.
 - `GET ${KONGODB_BASE_PATH}/ping`: service health + version.
 - `GET ${KONGODB_BASE_PATH}/meta/operations`: machine-readable operation catalog.
@@ -225,7 +225,7 @@ Use this table as the quick reference for common payload keys and their meanings
 | `profile_photo` | string | Identity user profile image URL, file id, or storage reference |
 | `provider` | string | Identity provider name, e.g. `google`, `github`, `password`, `custom` |
 | `provider_user_id` | string | Stable external provider user id |
-| `password_hash` | string | App-generated password hash. Kongo never stores raw passwords |
+| `password_hash` | string | App-generated password hash. KiDB never stores raw passwords |
 | `password_algo` | string | Password hash algorithm label, e.g. `argon2id` |
 | `requires_password_change` | bool | Identity account signal for the application to require a password change. Defaults to `false` on create |
 | `token_hash` | string | App-generated token hash for reset/magic/API/session references |
@@ -317,7 +317,7 @@ The table above is exhaustive. The groups below explain how the most reusable pr
 ### Datetime Values
 These rules define the accepted timestamp format for system-managed date fields.
 
-- Kongo system timestamps are UTC.
+- KiDB system timestamps are UTC.
 - Accepted datetime input format for system timestamp fields is RFC3339/ISO-8601 with timezone.
 - Examples:
   - `2025-12-24T23:39:26Z`
@@ -457,7 +457,7 @@ Use this catalog to find an operation by task. The detailed reference follows in
 | `metrics_catalog` | None | Discover registered event names and dimension paths. |
 | `audit_ingest` | `events[]` | Append immutable application audit events. |
 | `audit_query` | None | Search and filter the audit timeline. |
-| `user_create` | None | Create Identity user metadata; Kongo stores identity state but does not authenticate. |
+| `user_create` | None | Create Identity user metadata; KiDB stores identity state but does not authenticate. |
 | `user_get` | User selector | Fetch one user by ID, email, username, or provider identity. |
 | `user_query` | None | Search and paginate users. |
 | `user_get_details` | User selector | Fetch a user with providers, login methods, and recent lifecycle events. |
@@ -523,7 +523,7 @@ Use this catalog to find an operation by task. The detailed reference follows in
 | Operation | Required input | Purpose |
 |---|---|---|
 | `sql_execute` | `sql` | Execute one supported parameterized read, write, or limited DDL statement. |
-| `sql_list_tables` | None | List user-created tables while hiding Kongo/SQLite internals. |
+| `sql_list_tables` | None | List user-created tables while hiding KiDB/SQLite internals. |
 | `sql_get_table_schema` | `table` | Safely inspect a user table schema without exposing arbitrary PRAGMA. |
 
 ### System, Statistics, and Indexing
@@ -642,7 +642,7 @@ Use the operations in this order when learning the API:
 
 | Property | Type | Default | Meaning |
 |---|---:|---:|---|
-| `commit` | bool | Runtime configuration | `true` waits for the per-database write coordinator to persist the mutation. `false` accepts and queues it. If the queue is unavailable, Kongo falls back to committed execution. |
+| `commit` | bool | Runtime configuration | `true` waits for the per-database write coordinator to persist the mutation. `false` accepts and queues it. If the queue is unavailable, KiDB falls back to committed execution. |
 | `dry_run` | bool | `false` | Validates and evaluates the target without changing data. The response reports the expected counts. |
 | `max_docs` | int | Operation-specific | `-1` means all matches, `0` means no matched documents are changed, and a positive value caps the mutation. |
 
@@ -673,7 +673,7 @@ Creates one or many new JSON documents in one namespace. Use `insert` when the r
 | `commit` | bool | Runtime default | Selects committed or accepted acknowledgement. |
 | `dry_run` | bool | `false` | Reports how many documents would be inserted or skipped. |
 
-If `_id` is absent, Kongo generates a dashless UUIDv4. If `_id` is supplied, it must be a non-empty string. Generator Operators such as `$id_uuidv4` and `$ts_now` are expanded before persistence.
+If `_id` is absent, KiDB generates a dashless UUIDv4. If `_id` is supplied, it must be a non-empty string. Generator Operators such as `$id_uuidv4` and `$ts_now` are expanded before persistence.
 
 ##### Insert One
 
@@ -730,7 +730,7 @@ If `_id` is absent, Kongo generates a dashless UUIDv4. If `_id` is supplied, it 
 
 ##### Insert With Composite Uniqueness
 
-Use this form for idempotent creates based on an application key such as tenant plus email. This is not a database constraint; Kongo checks the composite values within the target namespace during insertion.
+Use this form for idempotent creates based on an application key such as tenant plus email. This is not a database constraint; KiDB checks the composite values within the target namespace during insertion.
 
 ```json
 {
@@ -803,6 +803,8 @@ By default, update data is a JSON merge patch: supplied fields are changed, unto
 | `dry_run` | bool | `false` | Validates the request and reports matched/update counts without writing. |
 
 An explicit-ID update without a namespace searches globally by `_id`. Supplying a namespace ensures the document belongs to that namespace. Missing IDs are skipped, not created.
+
+Updates reject `_created_at`, `_modified_at`, and paths rooted at either field in `data` or `update_data`. The stored `_created_at` is always preserved, while `_modified_at` is generated automatically in UTC after a successful change. This rule also applies to transaction, upsert-update, accepted-write, and lifecycle-update paths. Imported timestamps are supported only by insert/import flows that explicitly allow system timestamps.
 
 ##### Patch One Document
 
@@ -916,7 +918,7 @@ Updates documents matched by a non-empty filter, or inserts one document when no
 | `commit` | bool | Runtime default | Selects committed or accepted acknowledgement. Accepted upserts return an acknowledgement rather than a prepared document. |
 | `dry_run` | bool | `false` | Reports whether the operation would update or insert without writing. |
 
-A literal `filter._id` or `filter._id.$eq` string becomes the inserted `_id` when no match exists. For all other filters, Kongo generates a dashless UUIDv4. `_id` remains prohibited inside both data objects to prevent contradictory identity inputs.
+A literal `filter._id` or `filter._id.$eq` string becomes the inserted `_id` when no match exists. For all other filters, KiDB generates a dashless UUIDv4. `_id` remains prohibited inside both data objects to prevent contradictory identity inputs.
 
 ##### Update or Insert by Natural Key
 
@@ -976,7 +978,7 @@ With `max_docs:0`, existing matches remain unchanged and `update_data` is option
 
 #### `delete`
 
-Removes one or many live documents. By default deletion is recoverable: Kongo copies each matched document to `__kdb_archive`, preserves its original timestamps and namespace, assigns one `_txn_id` to the operation, and then removes it from the live table. Use `purge:true` only when the data must be permanently removed without entering the archive.
+Removes one or many live documents. By default deletion is recoverable: KiDB copies each matched document to `__kdb_archive`, preserves its original timestamps and namespace, assigns one `_txn_id` to the operation, and then removes it from the live table. Use `purge:true` only when the data must be permanently removed without entering the archive.
 
 ##### Selectors
 
@@ -1181,7 +1183,7 @@ The corresponding child result identifies which branch ran:
 }
 ```
 
-Transaction-level `on_error` controls an upsert failure. Under `fail`, it rolls back the entire transaction. Under `continue`, Kongo rolls back that child's savepoint and continues. Nested upsert does not redefine insert's `on_conflict` policy.
+Transaction-level `on_error` controls an upsert failure. Under `fail`, it rolls back the entire transaction. Under `continue`, KiDB rolls back that child's savepoint and continues. Nested upsert does not redefine insert's `on_conflict` policy.
 
 ##### Insert With Composite Uniqueness
 
@@ -2316,7 +2318,7 @@ For this source value:
 
 ###### Combining `fields` and `exclude_fields`
 
-When both properties are present, Kongo first builds the inclusion projection and then removes exclusions. This is useful when a broad object is convenient to include but a few nested fields must remain private.
+When both properties are present, KiDB first builds the inclusion projection and then removes exclusions. This is useful when a broad object is convenient to include but a few nested fields must remain private.
 
 ```json
 {
@@ -2359,7 +2361,7 @@ Projection paths such as `items[].sku` do not reshape every array element. If el
 
 ###### System and Query-Generated Fields
 
-Projection runs after Kongo attaches query-visible metadata, lookups, and per-row Compute Operators.
+Projection runs after KiDB attaches query-visible metadata, lookups, and per-row Compute Operators.
 
 | Field | Projection behavior |
 |---|---|
@@ -2395,7 +2397,7 @@ Returned item:
 
 For document queries, response shaping occurs in this order:
 
-1. Kongo retrieves and decorates the base documents with configured timestamps and namespace metadata.
+1. KiDB retrieves and decorates the base documents with configured timestamps and namespace metadata.
 2. Pending accepted-write state overlays exact-ID reads when applicable.
 3. Lookup Operators attach related documents.
 4. Per-row Compute Operators add derived fields.
@@ -2989,7 +2991,7 @@ The match names communicate relationship direction. Internally, the selected loc
 | `$root.` | Original root query document | Refer back to the root from any nested depth. |
 | `$lookup.<alias>.` | A completed lookup alias in the same scope | Build a lookup from another lookup result, including forward references. |
 
-Array traversal uses `[]`, for example `$lookup.items[].product_id`. Sibling aliases that do not depend on each other run concurrently. References create a dependency graph; Kongo topologically schedules them, permits forward references, and rejects unknown aliases or cycles.
+Array traversal uses `[]`, for example `$lookup.items[].product_id`. Sibling aliases that do not depend on each other run concurrently. References create a dependency graph; KiDB topologically schedules them, permits forward references, and rejects unknown aliases or cycles.
 
 ###### One-to-One Lookup With `$eq`
 
@@ -3346,7 +3348,7 @@ Returned item:
 
 ##### Generator Operators
 
-Generator Operators are exact single-key objects embedded anywhere in `data`, `insert_data`, or `update_data`. Kongo resolves recognized operators before persistence. A normal document key that merely starts with `$` is not treated as a generator unless the complete single-key object matches a supported operator.
+Generator Operators are exact single-key objects embedded anywhere in `data`, `insert_data`, or `update_data`. KiDB resolves recognized operators before persistence. A normal document key that merely starts with `$` is not treated as a generator unless the complete single-key object matches a supported operator.
 
 | Operator | Operand | Definition | Example |
 |---|---|---|---|
@@ -3477,7 +3479,7 @@ The gateway records the job and returns immediately. Background workers claim it
 | Property | Type | Default | Description |
 |---|---:|---:|---|
 | `source_path` | string | Required | Local path or `s3://bucket/key`. Compression is detected from `.zst`. |
-| `source_hash` | string | S3 metadata when present | Caller-provided source identity used for duplicate-job detection. For S3, Kongo also validates it against `x-amz-meta-source-hash`; local imports treat it as a caller-supplied identity. |
+| `source_hash` | string | S3 metadata when present | Caller-provided source identity used for duplicate-job detection. For S3, KiDB also validates it against `x-amz-meta-source-hash`; local imports treat it as a caller-supplied identity. |
 | `on_conflict` | string | `error` | `_id` conflict policy: `error`, `skip`, `replace`, or `merge`. |
 | `ignore_input_id` | bool | `false` | Removes incoming `_id` and `id`, then generates a new `_id`. `_key` remains normal data. |
 | `drop_keys` | string[] | `[]` | Removes named top-level or dot-path fields before persistence. `_id` cannot be dropped through this option. |
@@ -3485,7 +3487,7 @@ The gateway records the job and returns immediately. Background workers claim it
 | `batch_size` | int | `500` | Documents per committed import batch, clamped to `1..10000`. |
 | `resumable` | bool | `false` | Allows a failed job to be reopened with `continue_job`. |
 
-If a source hash matches an equivalent active or completed import for the same namespace and import options, Kongo returns the existing job with `deduped:true` instead of enqueuing a duplicate.
+If a source hash matches an equivalent active or completed import for the same namespace and import options, KiDB returns the existing job with `deduped:true` instead of enqueuing a duplicate.
 
 ##### Import a Local File
 
@@ -3551,7 +3553,7 @@ Creates a background job that queries documents and writes newline-delimited JSO
 ##### Scope and Output
 
 - Select one namespace with a string, several with `namespace:["users","admins"]`, or all with `namespace:"*"`/`scope:"all"`.
-- If `target_path` is omitted, Kongo generates a path under the configured export destination.
+- If `target_path` is omitted, KiDB generates a path under the configured export destination.
 - A local target writes to local storage.
 - An `s3://bucket/prefix/object` target uses configured S3 credentials.
 - `compress:true` produces `.jsonl.zst`; `compress:false` produces `.jsonl`.
@@ -3560,7 +3562,7 @@ Creates a background job that queries documents and writes newline-delimited JSO
 
 | Property | Type | Default | Description |
 |---|---:|---:|---|
-| `target_path` | string | Generated | Local path or S3 URI. Kongo adds the canonical extension when needed. |
+| `target_path` | string | Generated | Local path or S3 URI. KiDB adds the canonical extension when needed. |
 | `compress` | bool | `true` | Writes Zstandard-compressed JSONL when true. |
 | `include_system_timestamps` | bool | `true` | Includes `_created_at` and `_modified_at` in each exported object. |
 | `filter` | object | `{}` | Filter expression applied to the export source. |
@@ -3874,7 +3876,7 @@ Example: list dimensions for one event.
 ```
 
 ### 3) Audit Logs
-Audit Logs store application-supplied activity as immutable rows. Kongo does not infer an actor from the access key or automatically audit every gateway request; the application explicitly records the events that carry useful business context.
+Audit Logs store application-supplied activity as immutable rows. KiDB does not infer an actor from the access key or automatically audit every gateway request; the application explicitly records the events that carry useful business context.
 
 Internal table:
 - `__kdb_audit_logs`: append-only audit events ordered by `ts`.
@@ -3945,7 +3947,7 @@ Optional payload:
 ```
 
 ### 4) Identity Store
-Identity operations store login-related metadata for your app. Kongo does not authenticate users, verify passwords, validate OAuth tokens, issue sessions, or enforce app permissions.
+Identity operations store login-related metadata for your app. KiDB does not authenticate users, verify passwords, validate OAuth tokens, issue sessions, or enforce app permissions.
 
 Internal tables:
 - `__kdb_identity_users`: local user/account metadata.
@@ -3957,7 +3959,7 @@ Rules:
 - User ids default to dashless UUID v4.
 - `user_create` may accept caller-provided `user_id`; it must be a 32-character dashless UUID string.
 - `first_name`, `last_name`, and `profile_photo` are first-class profile columns.
-- `requires_password_change` is an application-facing account signal; Kongo stores and returns it but does not enforce login behavior.
+- `requires_password_change` is an application-facing account signal; KiDB stores and returns it but does not enforce login behavior.
 - Presentation preferences such as `display_name`, `timezone`, and `locale` should live in `data`.
 - Store `password_hash`, never raw passwords.
 - Store `token_hash`, never raw reset/magic/API tokens.
@@ -4249,15 +4251,15 @@ Example: purge.
 ```
 
 ### 5) File Catalog
-File operations store metadata for files or objects that your application uploads somewhere else. Kongo does not upload, download, stream, move, or delete the actual bytes in this phase.
+File operations store metadata for files or objects that your application uploads somewhere else. KiDB does not upload, download, stream, move, or delete the actual bytes in this phase.
 
 Internal table:
 - `__kdb_files`: file/object metadata registry.
 
 Rules:
 - File ids default to dashless UUID v4.
-- `uploaded_at` is when the app/object store received the file. If omitted, Kongo sets it to server UTC now.
-- `created_at` is when the metadata row was registered in Kongo.
+- `uploaded_at` is when the app/object store received the file. If omitted, KiDB sets it to server UTC now.
+- `created_at` is when the metadata row was registered in KiDB.
 - `owner_type` + `owner_id` are optional generic attachment fields, such as `user` + `user_123` or `invoice` + `inv_001`.
 - `file_delete` soft-deletes metadata by setting `status=deleted` and `deleted_at`.
 - `file_delete` with `purge=true` hard-deletes the metadata row only.
@@ -4817,7 +4819,7 @@ These are the supported runtime storage backends for database files and remote s
 - `s3`: object-store mode with WAL/manifest/snapshots in a single remote S3 tier.
 
 ## Deployment
-This section covers the common deployment paths and how Kongo stores data in each environment.
+This section covers the common deployment paths and how KiDB stores data in each environment.
 
 ### Docker Data Persistence
 The Docker image defaults `KONGODB_DATA_DIR` to `/data` and declares `/data` as a volume. Local backup/export defaults are also moved under `/data` inside the image:
@@ -4865,7 +4867,7 @@ docker run -d \
   kongodb
 ```
 
-Binding to `127.0.0.1` keeps Kongo private to the host so a reverse proxy such as Caddy, Nginx, or Traefik can terminate HTTPS publicly.
+Binding to `127.0.0.1` keeps KiDB private to the host so a reverse proxy such as Caddy, Nginx, or Traefik can terminate HTTPS publicly.
 
 ### Docker Compose
 The repository includes [`compose.yaml`](/Users/mardix/Dropbox/Projects/kongodb/compose.yaml) as a local durable example.
@@ -4924,7 +4926,7 @@ KONGODB_S3_SECRET_KEY=...
 
 ## Configuration
 
-[`kongodb.env`](/Users/mardix/Dropbox/Projects/kongodb/kongodb.env) is the canonical environment template. Kongo exposes deployment choices, API semantics, retention, and bounded resource controls; low-level worker thresholds use internal defaults selected by `KONGODB_RUNTIME_PROFILE`.
+[`kongodb.env`](/Users/mardix/Dropbox/Projects/kongodb/kongodb.env) is the canonical environment template. KiDB exposes deployment choices, API semantics, retention, and bounded resource controls; low-level worker thresholds use internal defaults selected by `KONGODB_RUNTIME_PROFILE`.
 
 SQL execution, FTS capability, metric events, auto-indexing, JSONB storage, the system catalog, safe hydration, temporary-file cleanup, and background job workers are always enabled. Per-DB `fts_enabled` still controls whether a specific database can be searched.
 
@@ -4959,7 +4961,7 @@ KONGODB_AUTH_MODE=none
 KONGODB_ACCESS_KEY=
 ```
 
-Kongo fails at startup when `KONGODB_AUTH_MODE` is invalid or when `access_key` mode has no key. In `none` mode, any configured access key is ignored.
+KiDB fails at startup when `KONGODB_AUTH_MODE` is invalid or when `access_key` mode has no key. In `none` mode, any configured access key is ignored.
 
 ### Storage and S3
 
@@ -5004,7 +5006,7 @@ Profile defaults:
 
 Writer leases, WAL segment size, flush cadence, safe hydrate, integrity checks, snapshot count cap, and temporary-artifact cleanup use fixed safe defaults.
 
-In S3 mode, `manifest.current_snapshot_key` is authoritative. Snapshot bytes are uploaded once to `snapshots/<snapshot_id>.db`; hydration, verification, and restore resolve the object through the manifest. `single` topology is recommended when only one Kongo process serves the S3 prefix because it avoids continuous manifest GET requests.
+In S3 mode, `manifest.current_snapshot_key` is authoritative. Snapshot bytes are uploaded once to `snapshots/<snapshot_id>.db`; hydration, verification, and restore resolve the object through the manifest. `single` topology is recommended when only one KiDB process serves the S3 prefix because it avoids continuous manifest GET requests.
 
 The TTL reaper checks active databases on its fixed interval but only publishes an S3 checkpoint when it actually archives, deletes, expires, or transitions data. An idle reaper run does not upload a snapshot.
 

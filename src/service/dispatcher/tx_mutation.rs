@@ -491,6 +491,7 @@ async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
 async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<()> {
     let collection = require_collection(payload)?;
     let lifecycle_specs = parse_document_lifecycle(payload.lifecycle.clone())?;
+    reject_update_system_timestamps(payload.data.as_ref(), "data")?;
     let mut data = require_object(payload.data.clone(), "data")?;
     expand_kdb_macros_in_value(&mut data)?;
     let id = data
@@ -1135,6 +1136,31 @@ fn replacement_doc_from_payload(doc: &mut Value, id: &str) -> AppResult<Value> {
         out.insert(k.clone(), v.clone());
     }
     Ok(Value::Object(out))
+}
+
+fn reject_update_system_timestamps(value: Option<&Value>, field_name: &str) -> AppResult<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let values: Vec<&Value> = match value {
+        Value::Array(items) => items.iter().collect(),
+        _ => vec![value],
+    };
+    for item in values {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        if obj.keys().any(|key| {
+            matches!(key.as_str(), "_created_at" | "_modified_at")
+                || key.starts_with("_created_at.")
+                || key.starts_with("_modified_at.")
+        }) {
+            return Err(AppError::BadRequest(format!(
+                "{field_name} cannot contain _created_at or _modified_at; update preserves _created_at and manages _modified_at automatically"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn delete_archive_ttl_secs(state: &AppState, payload_ttl: Option<i64>) -> AppResult<Option<i64>> {
@@ -2731,5 +2757,25 @@ mod transaction_tests {
             prepare_transaction_operations(upsert).expect("transaction upsert is supported");
         assert_eq!(operations[0].operation, "upsert");
         assert_eq!(operations[0].namespace.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn updates_reject_system_timestamp_fields() {
+        for field in ["_created_at", "_modified_at", "_created_at.value"] {
+            let mut value = json!({"_id": "doc-1"});
+            value.as_object_mut().expect("object").insert(
+                field.to_string(),
+                Value::String("2026-01-01T00:00:00Z".to_string()),
+            );
+            let error = reject_update_system_timestamps(Some(&value), "data")
+                .expect_err("system timestamp update must fail");
+            assert!(error.to_string().contains("cannot contain _created_at or _modified_at"));
+        }
+
+        reject_update_system_timestamps(
+            Some(&json!({"_id": "doc-1", "profile": {"_created_at": "custom"}})),
+            "data",
+        )
+        .expect("nested user fields with the same name remain valid");
     }
 }

@@ -52,8 +52,8 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
           ) : null}
         </nav>
         <div className="sidebar-border flex w-full flex-col items-center gap-3 border-t p-3">
-          <a href={`${origin}/doc`} target="_blank" rel="noreferrer" className="text-[10px] font-semibold text-slate-400 hover:text-emerald-300" title="Open Kongo Docs">Docs</a>
-          <span className="font-mono text-[9px] text-slate-500" title={`Kongo ${formatVersion(serviceInfo?.version)}`}>{compactVersion(serviceInfo?.version)}</span>
+          <a href={`${origin}/doc`} target="_blank" rel="noreferrer" className="text-[10px] font-semibold text-slate-400 hover:text-emerald-300" title="Open KiDB Docs">Docs</a>
+          <span className="font-mono text-[9px] text-slate-500" title={`KiDB ${formatVersion(serviceInfo?.version)}`}>{compactVersion(serviceInfo?.version)}</span>
           <div className={`h-2.5 w-2.5 rounded-full ${statusDot(status.tone)}`} title={status.text} />
         </div>
       </aside>
@@ -64,8 +64,8 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
     <aside className="sidebar-shell">
       <div className="sidebar-border border-b p-5">
         <div className="flex items-start justify-between gap-3">
-          <button type="button" onClick={() => setPage('home')} className="text-left" aria-label="Open Kongo Home">
-            <div className="sidebar-brand text-xl font-black uppercase tracking-[0.22em]">Kongo</div>
+          <button type="button" onClick={() => setPage('home')} className="text-left" aria-label="Open KiDB Home">
+            <div className="sidebar-brand text-3xl font-black">KiDB</div>
             <h1 className="mt-2 text-xs font-light uppe_rcase tracking-widest">Admin Console</h1>
           </button>
           <button type="button" onClick={onToggleCollapsed} className="rounded-md border border-white/10 px-2 py-1 text-xs font-semibold text-slate-400 transition hover:bg-white/10 hover:text-white" title="Collapse Sidebar" aria-label="Collapse Sidebar">←</button>
@@ -87,7 +87,7 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
         {stage === 'primary' ? (
           <div className="space-y-2">
             <div className="sidebar-section">Start</div>
-            <SidebarItem title="Home" description="Welcome to Kongo" active={page === 'home'} onClick={() => setPage('home')} />
+            <SidebarItem title="Home" description="Welcome to KiDB" active={page === 'home'} onClick={() => setPage('home')} />
           </div>
         ) : null}
 
@@ -110,7 +110,7 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
 
       <div className="border-t border-white/10 p-4">
         <a href={`${origin}/doc`} target="_blank" rel="noreferrer" className="flex items-center justify-between rounded-lg px-2 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white">
-          <span>Kongo Docs</span>
+          <span>KiDB Docs</span>
           <span aria-hidden="true">↗</span>
         </a>
         <div className="mt-2 flex items-center justify-between px-2 text-[11px]"><span className="text-slate-500">Version</span><span className="font-mono text-slate-300">{formatVersion(serviceInfo?.version)}</span></div>
