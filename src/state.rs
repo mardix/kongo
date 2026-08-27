@@ -110,6 +110,14 @@ struct QueuedWrite {
     response_tx: Option<oneshot::Sender<AppResult<GatewayResponse>>>,
 }
 
+fn remove_write_queue_generation(
+    queues: &DashMap<String, mpsc::Sender<QueuedWrite>>,
+    db_path: &str,
+    sender: &mpsc::Sender<QueuedWrite>,
+) {
+    queues.remove_if(db_path, |_, current| current.same_channel(sender));
+}
+
 pub enum WriteEnqueueResult {
     Enqueued,
     Committed(AppResult<GatewayResponse>),
@@ -580,6 +588,7 @@ impl AppState {
         }
         let state = self.clone();
         let worker_db_path = db_path.to_string();
+        let worker_sender = tx.clone();
         let idle_secs = self.write_queue_idle_secs;
         tokio::spawn(async move {
             loop {
@@ -590,7 +599,17 @@ impl AppState {
                         .await
                     {
                         Ok(item) => item,
-                        Err(_) => break,
+                        Err(_) => {
+                            // Retire this generation before exiting. Closing first makes stale
+                            // sender clones fail, while recv continues draining already queued work.
+                            rx.close();
+                            remove_write_queue_generation(
+                                &state.write_queues,
+                                &worker_db_path,
+                                &worker_sender,
+                            );
+                            continue;
+                        }
                     }
                 };
                 let Some(item) = next else {
@@ -651,7 +670,7 @@ impl AppState {
                     }
                 }
             }
-            state.write_queues.remove(&worker_db_path);
+            remove_write_queue_generation(&state.write_queues, &worker_db_path, &worker_sender);
         });
         tx
     }
@@ -971,4 +990,47 @@ fn now_rfc3339() -> String {
 
 fn pending_document_key(db_path: &str, id: &str) -> String {
     format!("{db_path}\u{1f}{id}")
+}
+
+#[cfg(test)]
+mod write_queue_tests {
+    use super::*;
+
+    fn queued_write() -> QueuedWrite {
+        QueuedWrite {
+            db_path: "app/main".to_string(),
+            request: GatewayRequest {
+                db: Some("app/main".to_string()),
+                operation: "update".to_string(),
+                namespace: None,
+                payload: Default::default(),
+            },
+            mode: QueuedWriteMode::Committed,
+            response_tx: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn retiring_receiver_drains_queued_work_and_rejects_stale_senders() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        sender.send(queued_write()).await.expect("queue write");
+
+        receiver.close();
+        assert!(sender.send(queued_write()).await.is_err());
+        assert!(receiver.recv().await.is_some());
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[test]
+    fn stale_worker_cannot_remove_new_write_queue_generation() {
+        let queues = DashMap::new();
+        let (old_sender, _old_receiver) = mpsc::channel(1);
+        let (new_sender, _new_receiver) = mpsc::channel(1);
+        queues.insert("app/main".to_string(), new_sender.clone());
+
+        remove_write_queue_generation(&queues, "app/main", &old_sender);
+
+        let current = queues.get("app/main").expect("new generation remains");
+        assert!(current.same_channel(&new_sender));
+    }
 }
