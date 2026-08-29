@@ -503,7 +503,7 @@ Stores login-related metadata for your app. **KiDB does not authenticate anyone*
 | `user_create` | — | Create a user record (email, username, profile, provider link, `data`). |
 | `user_get` | `user_id`/`id`/`email`/`username` or `provider`+`provider_user_id` | Fetch one user. |
 | `user_get_details` | same selectors | Fetch a user plus linked providers and recent events. |
-| `user_query` | — | Paginated user search/list. |
+| `user_query` | — | Paginated user search/list, including Filter Operators on `data.*`. |
 | `user_update` | `user_id`/`id` | Update profile fields + `data`. |
 | `user_update_status` | `user_id`/`id`, `status` | Set status, optionally schedule an automatic future transition. |
 | `user_delete` | `user_id`/`id` | Soft-delete (revokes tokens, keeps identity reserved) or `purge=true` to hard-delete everything. |
@@ -569,6 +569,9 @@ Stores login-related metadata for your app. **KiDB does not authenticate anyone*
   "payload": {
     "search": "gmail.com",
     "status": "active",
+    "filter": {
+      "data.plan": {"$in": ["pro", "enterprise"]}
+    },
     "page": 1,
     "per_page": 25
   }
@@ -676,7 +679,7 @@ Metadata only — KiDB never touches the actual bytes. Your app still owns uploa
 |---|---|---|
 | `file_create` | `storage_backend`, `storage_path` | Register a file/object's metadata. |
 | `file_get` | `id` | Fetch one file record. |
-| `file_query` | — | List/search by bucket, owner, status, backend, content type. |
+| `file_query` | — | List/search by dedicated fields and Filter Operators on `metadata.*`. |
 | `file_update` | `id` | Update mutable metadata. |
 | `file_delete` | `id` | Soft-delete by default; `purge=true` hard-deletes the row. |
 
@@ -726,6 +729,9 @@ Metadata only — KiDB never touches the actual bytes. Your app still owns uploa
     "owner_type": "user",
     "owner_id": "u123",
     "status": "active",
+    "filter": {
+      "metadata.tags": {"$includes": "avatar"}
+    },
     "page": 1,
     "per_page": 25
   }
@@ -1143,7 +1149,8 @@ Manage whole namespaces as units instead of individual documents.
 | Op | Needs | What it does |
 |---|---|---|
 | `list_namespaces` | — | List namespaces + stats. |
-| `get_stats` | `namespace` | Live/archive stats for one namespace. |
+| `get_namespace_stats` | `namespace` | Live/archive stats for one namespace. |
+| `get_data_count` | — | Exact counts for documents/namespaces, users, files, metric events, and every user-created SQL table. |
 | `recompute_stats` | — | Rebuild global stats. |
 | `drop_namespace` | `namespace` | Archive + delete, or hard-delete with `purge=true`. |
 | `restore_archive` | `txn_id` / `ids` / `namespace + filter` | Restore from archive (`skip`/`replace`/`patch` conflict policy). |
@@ -1227,7 +1234,7 @@ Recognized inside `data`, `insert_data`, and `update_data` as single-key `$`-ope
 `$ts_now`, `$ts_now_ms`, `$id_uuidv4`, `$id_uuidv7`, `$id_random`, `$hash_value`
 
 **Mutation Operators** — modify existing values in place:
-`$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`
+`$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`, `$rename`
 
 ```json
 {
@@ -1245,7 +1252,20 @@ Recognized inside `data`, `insert_data`, and `update_data` as single-key `$`-ope
     },
     "tags": {
       "$addset": "beta"
+    },
+    "profile.legacy_name": {
+      "$rename": "profile.display_name"
     }
+  }
+}
+```
+
+Filter paths support `[]` when an array index is unknown. Separate wildcard paths are independent; use `$elemMatch` to require multiple conditions on the same element:
+
+```json
+{
+  "filter": {
+    "departments[].teams[].members[].name": "Ada"
   }
 }
 ```
@@ -1268,6 +1288,7 @@ The most commonly used fields across operations:
 | `limit` / `offset` / `page` / `per_page` | int | Pagination |
 | `fields` / `exclude_fields` | string[] | Projection |
 | `compute` | object | Aggregate/per-row derived values |
+| `array_filters` | object | Named Filter Operator objects for `$[name]` positional array updates |
 | `lookups` | object | Join map |
 | `scope` | string | `namespace` (default) or `all` |
 | `include_archive` / `archive_only` | bool | Read source control |

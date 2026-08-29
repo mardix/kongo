@@ -173,6 +173,14 @@ async fn user_query(conn: &libsql::Connection, req: GatewayRequest) -> AppResult
             libsql::Value::Text(like),
         ]);
     }
+    if let Some(filter) = payload.filter {
+        let filter = normalize_json_store_filter(filter, "data")?;
+        let compiled = build_where_on_base("data", &filter)?;
+        if compiled.sql != "1=1" {
+            clauses.push(format!("({})", compiled.sql));
+            binds.extend(compiled.binds);
+        }
+    }
 
     let where_clause = if clauses.is_empty() {
         "1=1".to_string()
@@ -913,14 +921,7 @@ fn normalize_rfc3339_utc(raw: &str) -> AppResult<String> {
 }
 
 fn normalize_optional_id(id: Option<String>) -> AppResult<Option<String>> {
-    let Some(id) = clean_optional(id) else {
-        return Ok(None);
-    };
-    if id.chars().all(|c| c.is_ascii_hexdigit()) && id.len() == 32 {
-        Ok(Some(id.to_ascii_lowercase()))
-    } else {
-        Err(AppError::BadRequest("user_id must be a 32-character dashless uuid string".to_string()))
-    }
+    Ok(clean_optional(id))
 }
 
 fn required_text(value: Option<String>, name: &str) -> AppResult<String> {
@@ -937,4 +938,18 @@ fn non_empty_or(value: Option<String>, name: &str, default: &str) -> AppResult<S
 
 fn clean_optional(value: Option<String>) -> Option<String> {
     value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod identity_id_tests {
+    use super::normalize_optional_id;
+
+    #[test]
+    fn identity_ids_accept_and_preserve_custom_values() {
+        assert_eq!(
+            normalize_optional_id(Some("  Legacy-User:ABC  ".to_string())).unwrap(),
+            Some("Legacy-User:ABC".to_string())
+        );
+        assert_eq!(normalize_optional_id(Some("   ".to_string())).unwrap(), None);
+    }
 }

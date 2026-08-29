@@ -563,7 +563,8 @@ fn is_write_operation(operation: &str) -> bool {
             | "export_jsonl"
             | "get_job"
             | "list_jobs"
-            | "get_stats"
+            | "get_namespace_stats"
+            | "get_data_count"
             | "get_db_stats"
             | "query_db_stats"
             | "get_system_config"
@@ -1415,10 +1416,11 @@ async fn prepare_pending_update_preview(
         if payload.replace.unwrap_or(false) {
             let mut replacement = Value::Object(patch_obj);
             base = replacement_doc_from_payload(&mut replacement, &id)?;
-        } else if update_requires_mutation_engine(&patch_obj) {
+        } else if payload.array_filters.is_some() || update_requires_mutation_engine(&patch_obj) {
             apply_mutation_patch_to_doc(
                 &mut base,
                 &mut patch_obj,
+                payload.array_filters.as_ref(),
                 state.strict_mutation_operators,
             )?;
         } else {
@@ -1475,4 +1477,81 @@ fn apply_merge_patch_object(
         }
     }
     Ok(())
+}
+
+fn normalize_json_store_filter(filter: Value, field: &str) -> AppResult<Value> {
+    if filter.is_null() {
+        return Ok(filter);
+    }
+    let obj = filter
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("filter must be an object".to_string()))?;
+    let mut normalized = serde_json::Map::<String, Value>::new();
+    let path_prefix = format!("{field}.");
+
+    for (key, value) in obj {
+        match key.as_str() {
+            "$and" | "$or" | "$nor" => {
+                let items = value
+                    .as_array()
+                    .ok_or_else(|| AppError::BadRequest(format!("{key} must be an array")))?;
+                let mut nested = Vec::<Value>::with_capacity(items.len());
+                for item in items {
+                    nested.push(normalize_json_store_filter(item.clone(), field)?);
+                }
+                normalized.insert(key.clone(), Value::Array(nested));
+            }
+            "$not" => {
+                normalized.insert(
+                    key.clone(),
+                    normalize_json_store_filter(value.clone(), field)?,
+                );
+            }
+            _ => {
+                let path = key.strip_prefix(&path_prefix).ok_or_else(|| {
+                    AppError::BadRequest(format!(
+                        "filter fields for this operation must start with {field}."
+                    ))
+                })?;
+                if path.is_empty() {
+                    return Err(AppError::BadRequest(format!(
+                        "filter path after {field}. cannot be empty"
+                    )));
+                }
+                normalized.insert(path.to_string(), value.clone());
+            }
+        }
+    }
+    Ok(Value::Object(normalized))
+}
+
+#[cfg(test)]
+mod json_store_filter_tests {
+    use super::{build_where_on_base, normalize_json_store_filter};
+    use serde_json::json;
+
+    #[test]
+    fn normalizes_prefixed_json_filters_with_logical_operators() {
+        let filter = normalize_json_store_filter(
+            json!({
+                "$or": [
+                    {"metadata.image.width": {"$gte": 1024}},
+                    {"metadata.tags": {"$includes": "retina"}}
+                ]
+            }),
+            "metadata",
+        )
+        .unwrap();
+        let compiled = build_where_on_base("metadata", &filter).unwrap();
+        assert!(compiled.sql.contains("metadata ->> '$.image.width'"));
+        assert!(compiled.sql.contains("json_each(json_extract(metadata, '$.tags'))"));
+        assert_eq!(compiled.binds.len(), 2);
+    }
+
+    #[test]
+    fn rejects_filters_outside_the_store_json_field() {
+        let error = normalize_json_store_filter(json!({"status": "active"}), "data")
+            .unwrap_err();
+        assert!(error.to_string().contains("must start with data."));
+    }
 }

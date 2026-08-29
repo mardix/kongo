@@ -121,6 +121,7 @@ pub struct OperationPayload {
     pub id: Option<String>,
     pub ids: Option<Vec<String>>,
     pub data: Option<Value>,
+    pub array_filters: Option<Value>,
     pub lifecycle: Option<Value>,
     pub update_data: Option<Value>,
     pub insert_data: Option<Value>,

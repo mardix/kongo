@@ -14,6 +14,10 @@ pub fn build_where(filter: &Value) -> AppResult<CompiledWhere> {
     compile_filter_on_base("data", filter, false)
 }
 
+pub fn build_where_on_base(base_expr: &str, filter: &Value) -> AppResult<CompiledWhere> {
+    compile_filter_on_base(base_expr, filter, false)
+}
+
 fn compile_filter_on_base(
     base_expr: &str,
     filter: &Value,
@@ -103,6 +107,28 @@ fn compile_field_expr_on_base(
     path: &str,
     value: &Value,
 ) -> AppResult<CompiledWhere> {
+    if let Some((array_path, remainder)) = split_first_array_path(path)? {
+        let element_filter = if remainder.is_empty() {
+            if value
+                .as_object()
+                .is_some_and(|obj| !obj.is_empty() && obj.keys().all(|key| key.starts_with('$')))
+            {
+                value.clone()
+            } else {
+                let mut equality = serde_json::Map::new();
+                equality.insert("$eq".to_string(), value.clone());
+                Value::Object(equality)
+            }
+        } else {
+            let mut nested = serde_json::Map::new();
+            nested.insert(remainder, value.clone());
+            Value::Object(nested)
+        };
+        let mut elem_match = serde_json::Map::new();
+        elem_match.insert("$elemMatch".to_string(), element_filter);
+        return compile_field_expr_on_base(base_expr, &array_path, &Value::Object(elem_match));
+    }
+
     let scalar_expr = json_path_expr(base_expr, path)?;
     let array_expr = json_array_expr(base_expr, path)?;
 
@@ -138,6 +164,33 @@ fn compile_field_expr_on_base(
         sql: parts.join(" AND "),
         binds,
     })
+}
+
+fn split_first_array_path(path: &str) -> AppResult<Option<(String, String)>> {
+    let segments = path.split('.').collect::<Vec<_>>();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(AppError::BadRequest("invalid filter path".to_string()));
+    }
+
+    let mut prefix = Vec::<&str>::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if let Some(field) = segment.strip_suffix("[]") {
+            if field.is_empty() || field.contains('[') || field.contains(']') {
+                return Err(AppError::BadRequest(format!(
+                    "invalid array filter path segment: {segment}"
+                )));
+            }
+            prefix.push(field);
+            return Ok(Some((prefix.join("."), segments[index + 1..].join("."))));
+        }
+        if segment.contains('[') || segment.contains(']') {
+            return Err(AppError::BadRequest(format!(
+                "invalid array filter path segment: {segment}; use []"
+            )));
+        }
+        prefix.push(segment);
+    }
+    Ok(None)
 }
 
 fn compile_operator(
@@ -335,14 +388,25 @@ fn compile_operator(
 }
 
 fn compile_elem_match(array_expr: &str, operand: &Value) -> AppResult<CompiledWhere> {
-    let inner = compile_filter_on_base("je.value", operand, true)?;
+    let alias = json_each_alias(array_expr);
+    let inner = compile_filter_on_base(&format!("{alias}.value"), operand, true)?;
     Ok(CompiledWhere {
         sql: format!(
-            "EXISTS (SELECT 1 FROM json_each({}) je WHERE {})",
-            array_expr, inner.sql
+            "EXISTS (SELECT 1 FROM json_each({}) {} WHERE {})",
+            array_expr, alias, inner.sql
         ),
         binds: inner.binds,
     })
+}
+
+fn json_each_alias(array_expr: &str) -> String {
+    // Stable FNV-1a keeps nested json_each aliases unique without compiler-global state.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in array_expr.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("je_{hash:x}")
 }
 
 fn compile_size_predicate(
@@ -481,5 +545,40 @@ fn json_to_sql_value(v: &Value) -> AppResult<libsql::Value> {
         Value::Array(_) | Value::Object(_) => Err(AppError::BadRequest(
             "nested array/object values are not supported in scalar comparisons".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_where;
+    use serde_json::json;
+
+    #[test]
+    fn array_paths_compile_to_independent_element_traversals() {
+        let compiled = build_where(&json!({
+            "people[].name": "Ada",
+            "people[].age": {"$gte": 18}
+        }))
+        .expect("array paths should compile");
+        assert_eq!(compiled.sql.matches("EXISTS").count(), 2);
+        assert_eq!(compiled.binds.len(), 2);
+    }
+
+    #[test]
+    fn nested_array_paths_compile_recursively() {
+        let compiled = build_where(&json!({
+            "departments[].teams[].members[].name": "Ada"
+        }))
+        .expect("nested array paths should compile");
+        assert_eq!(compiled.sql.matches("EXISTS").count(), 3);
+        assert_eq!(compiled.binds.len(), 1);
+    }
+
+    #[test]
+    fn scalar_array_paths_support_operator_objects() {
+        let compiled = build_where(&json!({"scores[]": {"$gte": 90}}))
+            .expect("scalar array operator should compile");
+        assert!(compiled.sql.contains(".value"));
+        assert_eq!(compiled.binds.len(), 1);
     }
 }

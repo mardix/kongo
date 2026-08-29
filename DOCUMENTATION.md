@@ -478,7 +478,8 @@ Use this catalog to find an operation by task. The detailed reference follows in
 | Operation | Required input | Purpose |
 |---|---|---|
 | `list_namespaces` | None | List namespaces and their statistics. |
-| `get_stats` | `namespace` | Read live/archive counts and bytes for one namespace. |
+| `get_namespace_stats` | `namespace` | Read live/archive counts and bytes for one namespace. |
+| `get_data_count` | None | Return the complete exact stored-data inventory for the database. |
 | `recompute_stats` | None | Queue a full rebuild of namespace statistics. |
 | `drop_namespace` | `namespace` | Archive all namespace documents or permanently purge them. |
 | `restore_archive` | `txn_id`, `ids`, or namespace/filter | Restore archived documents with a conflict policy. |
@@ -587,7 +588,7 @@ Use Mutation Operators to transform existing document values.
 
 | Operation | Required Field | Description |
 |---|---|---|
-| `Mutate value` | Exact single-key operator object | `$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset` |
+| `Mutate value` | Exact single-key operator object | `$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`, `$rename` |
 
 ### Lookup Match Operators (`payload.lookups`)
 Use Lookup Match Operators to describe the direction of a document relationship.
@@ -1843,7 +1844,7 @@ Lifecycle transitions and TTL serve different purposes:
 | `at` | string | One time selector | Absolute RFC3339 datetime normalized to UTC. Mutually exclusive with `after_seconds`. |
 | `after_seconds` | int | One time selector | Positive delay. The clock starts when the scheduling write commits, including accepted writes. |
 | `when` | object | Yes | Filter Operators evaluated against the current document inside the serialized execution transaction. `{}` means always apply while the document exists. |
-| `update` | object | Yes | JSON merge patch or Mutation Operators. `_id` cannot be changed. Generator Operators are resolved when execution occurs, not when scheduled. |
+| `update` | object | Yes | JSON merge patch or Mutation Operators. `_id` cannot be changed. Generator Operators are resolved when execution occurs, not when scheduled. `array_filters` enables named positional paths. |
 | `ttl_seconds` | int | No | `1+` assigns a TTL from execution time; `0` clears the existing TTL. |
 | `expiry_behavior` | string | No | Optional `archive` or `delete` behavior applied with the transition. |
 
@@ -2104,6 +2105,17 @@ Multiple operators on one field are also implicitly joined with AND:
 | `$none` | Non-empty array | Array field contains none of the supplied values. | `{"flags":{"$none":["fraud","blocked"]}}` |
 | `$elemMatch` | Filter object | At least one array element satisfies the complete nested filter. | `{"items":{"$elemMatch":{"sku":"A1","qty":{"$gte":2}}}}` |
 | `$size` | Integer or comparison object | Array length equals or compares against the operand. | `{"roles":{"$size":{"$gte":2}}}` |
+
+Array traversal can also use `[]` in a field path when the element index is unknown. Each wildcard path is an independent existential condition:
+
+```json
+{
+  "people[].name": "Ada",
+  "people[].age": {"$gte": 18}
+}
+```
+
+This means some element has `name="Ada"` and some element has `age >= 18`; they may be different elements. Use `$elemMatch` when all conditions must match the same element. Wildcards may be nested, for example `departments[].teams[].members[].name`. Scalar arrays also work: `{"scores[]":{"$gte":90}}`. Only the exact `[]` suffix is accepted; `[*]` is invalid. Wildcard paths are supported anywhere the shared Filter Operators compiler is used, including document filters, identity `data.*`, and file `metadata.*` filters.
 
 `$size` accepts an integer directly or `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, and `$lte`:
 
@@ -3409,6 +3421,9 @@ Mutation Operators are intended for `update`. They operate on the current stored
 | `$extend` | Array | Appends all operand items to the target array. | `"tags":{"$extend":["paid","beta"]}` |
 | `$pull` | One value or array | Removes every target item equal to any operand value. | `"tags":{"$pull":["old","blocked"]}` |
 | `$addset` | One value or array | Appends only values not already present by JSON equality. | `"roles":{"$addset":"editor"}` |
+| `$rename` | Non-empty target path string | Moves the source field to the target dot path, removes the source, and overwrites an existing destination. A missing source is a no-op. | `"profile.legacy_name":{"$rename":"profile.display_name"}` |
+
+`$rename` cannot target `_id`, `_created_at`, or `_modified_at`, and it cannot move a field beneath itself. With `KONGODB_STRICT_MUTATIONS_OPERATORS=false`, malformed operands are ignored; strict mode rejects them.
 
 Given this document:
 
@@ -3418,7 +3433,7 @@ Given this document:
   "score": 10,
   "tags": ["new", "beta"],
   "events": [],
-  "profile": {"legacy": true}
+  "profile": {"legacy": true, "old_label": "Primary"}
 }
 ```
 
@@ -3435,7 +3450,8 @@ Request:
       "score": {"$inc": 5},
       "tags": {"$addset": ["beta", "paid"]},
       "events": {"$push": {"type": "login"}},
-      "profile.legacy": {"$unset": true}
+      "profile.legacy": {"$unset": true},
+      "profile.old_label": {"$rename": "profile.label"}
     }
   }
 }
@@ -3449,7 +3465,7 @@ Returned updated item:
   "score": 15,
   "tags": ["new", "beta", "paid"],
   "events": [{"type": "login"}],
-  "profile": {}
+  "profile": {"label": "Primary"}
 }
 ```
 
@@ -3457,6 +3473,39 @@ Mutation strictness is controlled by `KONGODB_STRICT_MUTATIONS_OPERATORS`:
 
 - `false` (default): an unknown Mutation Operator, most invalid operands, or an incompatible existing field type leaves that field unchanged rather than failing the entire update. Array operators initialize missing and null targets as arrays. An unrecognized `$pop` operand is normalized to an end-pop.
 - `true`: unknown operators, invalid operands, and incompatible target types reject the request.
+
+##### Positional Array Updates
+
+Use named positional selectors in mutation paths when an update should affect only array elements matching a condition. The selector syntax is `$[name]`; its condition is supplied in `payload.array_filters`:
+
+```json
+{
+  "operation": "update",
+  "db": "commerce/main",
+  "namespace": "orders",
+  "payload": {
+    "data": {
+      "shipments.$[shipment].items.$[item].qty": {"$inc": 1},
+      "shipments.$[shipment].items.$[item].tags": {"$addset": "reviewed"}
+    },
+    "array_filters": {
+      "shipment": {
+        "status": {"$in": ["processing", "queued"]},
+        "warehouse.region": "us-east"
+      },
+      "item": {
+        "$and": [
+          {"qty": {"$gte": 2, "$lt": 10}},
+          {"sku": {"$in": ["A1", "B2"]}},
+          {"tags": {"$includes": "priority"}}
+        ]
+      }
+    }
+  }
+}
+```
+
+Selectors can be nested at multiple array levels. A filter is evaluated against each candidate array element, and all matching elements are updated. Named selectors may be reused in multiple mutation paths. Every selector used in `data` must have exactly one non-empty object in `array_filters`; unused filter entries are rejected. Positional selectors must follow an array field and precede a target field. Missing arrays match nothing. A non-array target is ignored in permissive mutation mode and rejected when `KONGODB_STRICT_MUTATIONS_OPERATORS=true`. The same feature is available in direct `update`, bulk/filter updates, data-array updates, `upsert` updates, transactions, and accepted-write preparation.
 
 ---
 
@@ -3957,7 +4006,7 @@ Internal tables:
 
 Rules:
 - User ids default to dashless UUID v4.
-- `user_create` may accept caller-provided `user_id`; it must be a 32-character dashless UUID string.
+- `user_create` may accept any non-empty string as a caller-provided `user_id`; the value is trimmed and otherwise preserved.
 - `first_name`, `last_name`, and `profile_photo` are first-class profile columns.
 - `requires_password_change` is an application-facing account signal; KiDB stores and returns it but does not enforce login behavior.
 - Presentation preferences such as `display_name`, `timezone`, and `locale` should live in `data`.
@@ -4087,7 +4136,10 @@ List/query identity users with pagination.
 - Optional payload:
   - `search` or `q`: matches id, email, username, or phone
   - `status`, `email`, `username`
+  - `filter`: Filter Operators targeting explicit `data.*` dot paths
   - `page`, `per_page`, `limit`, `offset`
+
+The `filter` object queries application-defined identity data stored under `data`. Every field path in this operation must begin with `data.`. It supports the same logical, comparison, membership, array, string, existence, and type Filter Operators documented for DocumentDB. Dedicated columns continue to use the top-level shortcuts above.
 
 Example:
 ```json
@@ -4097,6 +4149,26 @@ Example:
   "payload": {
     "search": "gmail.com",
     "status": "active",
+    "page": 1,
+    "per_page": 25
+  }
+}
+```
+
+Example: query nested identity data.
+```json
+{
+  "db": "app/main",
+  "operation": "user_query",
+  "payload": {
+    "status": "active",
+    "filter": {
+      "$and": [
+        {"data.plan": {"$in": ["pro", "enterprise"]}},
+        {"data.preferences.locale": "en-US"},
+        {"data.tags": {"$includes": "beta"}}
+      ]
+    },
     "page": 1,
     "per_page": 25
   }
@@ -4258,6 +4330,7 @@ Internal table:
 
 Rules:
 - File ids default to dashless UUID v4.
+- Caller-provided file ids may be any non-empty string; the value is trimmed and otherwise preserved.
 - `uploaded_at` is when the app/object store received the file. If omitted, KiDB sets it to server UTC now.
 - `created_at` is when the metadata row was registered in KiDB.
 - `owner_type` + `owner_id` are optional generic attachment fields, such as `user` + `user_123` or `invoice` + `inv_001`.
@@ -4271,7 +4344,7 @@ Create one file metadata record.
   - `storage_backend`
   - `storage_path`
 - Optional payload:
-  - `id` as a 32-character dashless UUID string
+  - `id` as a non-empty string; when omitted, KiDB generates a dashless UUID v4
   - `bucket`, defaults to `default`
   - `filename`, `content_type`, `size_bytes`, `sha256`
   - `status`, defaults to `active`
@@ -4323,7 +4396,10 @@ List file metadata rows with pagination.
   - `owner_type`, `owner_id`
   - `storage_backend`, `content_type`
   - `search` or `q`
+  - `filter`: Filter Operators targeting explicit `metadata.*` dot paths
   - `page`, `per_page`, `limit`, `offset`
+
+The `filter` object queries the application-defined JSON metadata object. Every field path in this operation must begin with `metadata.`. Existing dedicated-column selectors can be combined with the JSON filter and all conditions must match.
 
 Example: list all files attached to a user.
 ```json
@@ -4334,6 +4410,25 @@ Example: list all files attached to a user.
     "owner_type": "user",
     "owner_id": "u123",
     "status": "active",
+    "page": 1,
+    "per_page": 25
+  }
+}
+```
+
+Example: query nested metadata and an array value.
+```json
+{
+  "db": "app/main",
+  "operation": "file_query",
+  "payload": {
+    "content_type": "image/webp",
+    "filter": {
+      "$or": [
+        {"metadata.image.width": {"$gte": 1024}},
+        {"metadata.tags": {"$includes": "retina"}}
+      ]
+    },
     "page": 1,
     "per_page": 25
   }
@@ -4403,10 +4498,80 @@ This section documents namespace-wide stats, movement, restore, and deletion wor
 Lists namespaces + stats.
 - Required payload: none
 
-#### `get_stats`
+#### `get_namespace_stats`
 Read live/archive counts and bytes for one namespace.
 - Required:
   - top-level `namespace`
+
+#### `get_data_count`
+Returns a complete exact inventory of stored data in the current database. It always returns every category and accepts no namespace or payload options.
+
+The response includes:
+- live and archived document totals and bytes
+- every namespace with live/archive counts and bytes
+- identity user totals with every current status, plus direct `active` and `inactive` counts
+- file totals, status counts, and summed file size
+- metric event count
+- every user-created SQLite table and its exact row count, excluding `__kdb_*`, `sqlite_*`, views, virtual tables, and shadow tables
+- `generated_at` in UTC RFC3339 format
+
+```json
+{
+  "db": "app/main",
+  "operation": "get_data_count",
+  "payload": {}
+}
+```
+
+```json
+{
+  "status": "success",
+  "data": {
+    "documents": {
+      "total": 125430,
+      "archived": 3840,
+      "size_bytes": 877570145,
+      "archived_size_bytes": 29487210,
+      "namespaces": 2,
+      "items": [
+        {
+          "namespace": "orders",
+          "total": 78320,
+          "archived": 3510,
+          "size_bytes": 692841043,
+          "archived_size_bytes": 28410931
+        }
+      ]
+    },
+    "users": {
+      "total": 8420,
+      "active": 7901,
+      "inactive": 231,
+      "statuses": {
+        "active": 7901,
+        "inactive": 231,
+        "suspended": 76,
+        "banned": 12,
+        "deleted": 200
+      }
+    },
+    "files": {
+      "total": 32190,
+      "active": 31780,
+      "deleted": 410,
+      "size_bytes": 58472910234,
+      "statuses": {"active": 31780, "deleted": 410}
+    },
+    "metrics": {"events": 4821040},
+    "tables": {
+      "count": 1,
+      "total_rows": 72120,
+      "items": [{"name": "orders_sql", "rows": 72120}]
+    },
+    "generated_at": "2026-08-28T15:30:12.421Z"
+  }
+}
+```
 
 #### `recompute_stats`
 Rebuilds `__kdb_system_stats` globally.
@@ -5116,7 +5281,8 @@ These examples cover soft delete, namespace drop, TTL, restore, purge, and names
 These examples cover stats reads, system config, indexing, and FTS controls.
 
 ```jsonl
-{ "db":"myapp/main", "operation":"get_stats", "namespace":"users", "payload":{} }
+{ "db":"myapp/main", "operation":"get_namespace_stats", "namespace":"users", "payload":{} }
+{ "db":"myapp/main", "operation":"get_data_count", "payload":{} }
 { "db":"myapp/main", "operation":"get_system_config", "payload":{} }
 { "db":"myapp/main", "operation":"recompute_stats", "payload":{} }
 { "db":"myapp/main", "operation":"list_namespaces", "payload":{} }

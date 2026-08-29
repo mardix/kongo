@@ -500,7 +500,9 @@ async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
         .ok_or_else(|| AppError::BadRequest("data._id is required".to_string()))?
         .to_string();
     data.as_object_mut().expect("object checked").remove("_id");
-    if update_requires_mutation_engine(data.as_object().expect("object checked")) {
+    if payload.array_filters.is_some()
+        || update_requires_mutation_engine(data.as_object().expect("object checked"))
+    {
         let mut rows = tx
             .query(
                 "SELECT rowid, json(data)
@@ -530,7 +532,12 @@ async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
                 .as_object()
                 .cloned()
                 .ok_or_else(|| AppError::BadRequest("data must be object".to_string()))?;
-            apply_mutation_patch_to_doc(&mut doc, &mut patch_obj, strict)?;
+            apply_mutation_patch_to_doc(
+                &mut doc,
+                &mut patch_obj,
+                payload.array_filters.as_ref(),
+                strict,
+            )?;
             let data_expr = json_input_expr(jsonb_enabled());
             let data_str = doc.to_string();
             tx.execute(
@@ -815,11 +822,13 @@ async fn update_bulk_filter_same_patch(
     data: Option<Value>,
     max_docs: Option<i64>,
     dry_run: bool,
+    array_filters: Option<Value>,
 ) -> AppResult<GatewayResponse> {
     let filter = require_non_empty_filter(filter)?;
     let patch = require_object(data, "data")?;
     let strict = state.strict_mutation_operators;
-    let use_mutation = update_requires_mutation_engine(patch.as_object().expect("object checked"));
+    let use_mutation = array_filters.is_some()
+        || update_requires_mutation_engine(patch.as_object().expect("object checked"));
     let patch_obj = patch.as_object().expect("object checked");
     if patch_obj.is_empty() {
         return Err(AppError::BadRequest("data cannot be empty".to_string()));
@@ -863,6 +872,7 @@ async fn update_bulk_filter_same_patch(
                 conn,
                 rowid,
                 &mut patch_obj,
+                array_filters.as_ref(),
                 strict,
                 state.jsonb_enabled,
             )
@@ -928,6 +938,7 @@ async fn update_bulk_data_array(
     collection: Option<&str>,
     data: Option<Value>,
     dry_run: bool,
+    array_filters: Option<Value>,
 ) -> AppResult<GatewayResponse> {
     let mut arr = data
         .ok_or_else(|| AppError::BadRequest("data is required".to_string()))?
@@ -978,11 +989,13 @@ async fn update_bulk_data_array(
         }
 
         let patch_value = Value::Object(patch);
-        if update_requires_mutation_engine(
+        if array_filters.is_some()
+            || update_requires_mutation_engine(
             patch_value
                 .as_object()
                 .ok_or_else(|| AppError::BadRequest("data must be object".to_string()))?,
-        ) {
+        )
+        {
             let mut patch_obj = patch_value
                 .as_object()
                 .cloned()
@@ -992,6 +1005,7 @@ async fn update_bulk_data_array(
                 collection,
                 &id,
                 &mut patch_obj,
+                array_filters.as_ref(),
                 strict,
                 state.jsonb_enabled,
             )
@@ -1739,13 +1753,9 @@ fn resolve_kdb_hash(arg: Value) -> AppResult<Value> {
 }
 
 fn update_requires_mutation_engine(data: &serde_json::Map<String, Value>) -> bool {
-    data.values().any(|v| match v {
-        Value::Object(obj) if obj.len() == 1 => obj
-            .keys()
-            .next()
-            .map(|k| k.starts_with('$'))
-            .unwrap_or(false),
-        _ => false,
+    data.iter().any(|(path, value)| {
+        path.split('.').any(is_positional_selector)
+            || matches!(value, Value::Object(obj) if obj.len() == 1 && obj.keys().next().is_some_and(|key| key.starts_with('$')))
     })
 }
 
@@ -1754,6 +1764,7 @@ async fn update_one_with_mutation(
     collection: Option<&str>,
     id: &str,
     patch_obj: &mut serde_json::Map<String, Value>,
+    array_filters: Option<&Value>,
     strict: bool,
     jsonb_enabled: bool,
 ) -> AppResult<Option<Value>> {
@@ -1788,7 +1799,7 @@ async fn update_one_with_mutation(
         .map_err(|e| AppError::Internal(format!("update mutation data decode failed: {e}")))?;
     let mut doc = serde_json::from_str::<Value>(&raw)
         .map_err(|e| AppError::Internal(format!("update mutation json decode failed: {e}")))?;
-    apply_mutation_patch_to_doc(&mut doc, patch_obj, strict)?;
+    apply_mutation_patch_to_doc(&mut doc, patch_obj, array_filters, strict)?;
     let updated = update_rowid_json(conn, rowid, &doc, jsonb_enabled).await?;
     Ok(Some(updated))
 }
@@ -1797,6 +1808,7 @@ async fn update_one_by_rowid_with_mutation(
     conn: &libsql::Connection,
     rowid: i64,
     patch_obj: &mut serde_json::Map<String, Value>,
+    array_filters: Option<&Value>,
     strict: bool,
     jsonb_enabled: bool,
 ) -> AppResult<Option<Value>> {
@@ -1820,7 +1832,7 @@ async fn update_one_by_rowid_with_mutation(
         .map_err(|e| AppError::Internal(format!("update mutation rowid decode failed: {e}")))?;
     let mut doc = serde_json::from_str::<Value>(&raw)
         .map_err(|e| AppError::Internal(format!("update mutation rowid json decode failed: {e}")))?;
-    apply_mutation_patch_to_doc(&mut doc, patch_obj, strict)?;
+    apply_mutation_patch_to_doc(&mut doc, patch_obj, array_filters, strict)?;
     let updated = update_rowid_json(conn, rowid, &doc, jsonb_enabled).await?;
     Ok(Some(updated))
 }
@@ -1892,13 +1904,487 @@ async fn select_rowids_for_update(
 fn apply_mutation_patch_to_doc(
     doc: &mut Value,
     patch: &mut serde_json::Map<String, Value>,
+    array_filters: Option<&Value>,
     strict: bool,
 ) -> AppResult<()> {
+    let positional_filters = validate_positional_mutation_contract(patch, array_filters)?;
     for (path, spec) in patch {
-        validate_projection_path(path, "data")?;
-        apply_single_mutation_field(doc, path, spec, strict)?;
+        if path.split('.').any(is_positional_selector) {
+            apply_positional_mutation(doc, path, spec, &positional_filters, strict)?;
+        } else {
+            validate_projection_path(path, "data")?;
+            apply_single_mutation_field(doc, path, spec, strict)?;
+        }
     }
     Ok(())
+}
+
+fn is_positional_selector(segment: &str) -> bool {
+    segment.starts_with("$[") && segment.ends_with(']')
+}
+
+fn positional_selector_name(segment: &str) -> Option<&str> {
+    if !is_positional_selector(segment) {
+        return None;
+    }
+    let name = &segment[2..segment.len() - 1];
+    if name.is_empty()
+        || !name
+            .chars()
+            .enumerate()
+            .all(|(index, ch)| ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(name)
+}
+
+fn validate_positional_mutation_contract<'a>(
+    patch: &serde_json::Map<String, Value>,
+    array_filters: Option<&'a Value>,
+) -> AppResult<HashMap<String, &'a Value>> {
+    let mut selectors = HashSet::<String>::new();
+    for path in patch.keys() {
+        let segments = path.split('.').collect::<Vec<_>>();
+        if segments.iter().any(|segment| segment.is_empty()) {
+            return Err(AppError::BadRequest(format!("data contains invalid path: {path}")));
+        }
+        for (index, segment) in segments.iter().enumerate() {
+            if segment.contains("$[") || segment.contains(']') {
+                let name = positional_selector_name(segment).ok_or_else(|| {
+                    AppError::BadRequest(format!("invalid positional selector in path: {path}"))
+                })?;
+                if index == 0 || index + 1 == segments.len() {
+                    return Err(AppError::BadRequest(format!(
+                        "positional selector must follow an array field and precede a target field: {path}"
+                    )));
+                }
+                selectors.insert(name.to_string());
+            }
+        }
+    }
+
+    if selectors.is_empty() {
+        if array_filters.is_some() {
+            return Err(AppError::BadRequest(
+                "array_filters requires at least one $[name] path in data".to_string(),
+            ));
+        }
+        return Ok(HashMap::new());
+    }
+
+    let filters = match array_filters {
+        Some(value) => value.as_object().ok_or_else(|| {
+            AppError::BadRequest("array_filters must be a non-empty object".to_string())
+        })?,
+        None => {
+            let selector = selectors.iter().next().expect("selector is not empty");
+            return Err(AppError::BadRequest(format!(
+                "array_filters.{selector} is required by data"
+            )));
+        }
+    };
+    if filters.is_empty() {
+        return Err(AppError::BadRequest(
+            "array_filters must be a non-empty object".to_string(),
+        ));
+    }
+
+    let mut out = HashMap::<String, &Value>::new();
+    for (name, filter) in filters {
+        if positional_selector_name(&format!("$[{name}]")).is_none() {
+            return Err(AppError::BadRequest(format!(
+                "invalid array_filters selector name: {name}"
+            )));
+        }
+        if filter.as_object().is_none_or(serde_json::Map::is_empty) {
+            return Err(AppError::BadRequest(format!(
+                "array_filters.{name} must be a non-empty object"
+            )));
+        }
+        if !selectors.contains(name) {
+            return Err(AppError::BadRequest(format!(
+                "array_filters.{name} is not referenced by data"
+            )));
+        }
+        out.insert(name.clone(), filter);
+    }
+    for selector in selectors {
+        if !out.contains_key(&selector) {
+            return Err(AppError::BadRequest(format!(
+                "array_filters.{selector} is required by data"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+fn apply_positional_mutation(
+    root: &mut Value,
+    path: &str,
+    spec: &Value,
+    filters: &HashMap<String, &Value>,
+    strict: bool,
+) -> AppResult<()> {
+    let segments = path.split('.').collect::<Vec<_>>();
+    let selector_index = segments
+        .iter()
+        .position(|segment| is_positional_selector(segment))
+        .ok_or_else(|| AppError::Internal("positional selector missing".to_string()))?;
+    let prefix = segments[..selector_index].join(".");
+    let selector = positional_selector_name(segments[selector_index])
+        .ok_or_else(|| AppError::BadRequest(format!("invalid positional path: {path}")))?;
+    let remainder = segments[selector_index + 1..].join(".");
+    let filter = filters.get(selector).copied().ok_or_else(|| {
+        AppError::BadRequest(format!("array_filters.{selector} is required by data"))
+    })?;
+
+    let Some(target) = get_path_mut(root, &prefix) else {
+        return Ok(());
+    };
+    let Some(items) = target.as_array_mut() else {
+        if strict {
+            return Err(AppError::BadRequest(format!(
+                "{prefix}: positional target must be an array"
+            )));
+        }
+        return Ok(());
+    };
+
+    for item in items {
+        if json_filter_matches(item, filter)? {
+            if remainder.split('.').any(is_positional_selector) {
+                apply_positional_mutation(item, &remainder, spec, filters, strict)?;
+            } else {
+                validate_projection_path(&remainder, "positional data")?;
+                apply_single_mutation_field(item, &remainder, spec, strict)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_filter_matches(candidate: &Value, filter: &Value) -> AppResult<bool> {
+    let object = filter
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("array filter must be an object".to_string()))?;
+    for (key, predicate) in object {
+        let matched = match key.as_str() {
+            "$and" | "$or" | "$nor" => {
+                let filters = predicate.as_array().ok_or_else(|| {
+                    AppError::BadRequest(format!("{key} in array filter must be an array"))
+                })?;
+                if filters.is_empty() {
+                    return Err(AppError::BadRequest(format!(
+                        "{key} in array filter cannot be empty"
+                    )));
+                }
+                let mut matches = Vec::with_capacity(filters.len());
+                for nested in filters {
+                    matches.push(json_filter_matches(candidate, nested)?);
+                }
+                match key.as_str() {
+                    "$and" => matches.into_iter().all(|value| value),
+                    "$or" => matches.into_iter().any(|value| value),
+                    _ => !matches.into_iter().any(|value| value),
+                }
+            }
+            "$not" => !json_filter_matches(candidate, predicate)?,
+            operator if operator.starts_with('$') => {
+                json_filter_operator_matches(Some(candidate), operator, predicate)?
+            }
+            path => {
+                let values = json_filter_values(candidate, path)?;
+                json_field_predicate_matches(&values, predicate)?
+            }
+        };
+        if !matched {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn json_filter_values<'a>(candidate: &'a Value, path: &str) -> AppResult<Vec<&'a Value>> {
+    if path.is_empty() {
+        return Err(AppError::BadRequest(
+            "array filter path cannot be empty".to_string(),
+        ));
+    }
+    let mut values = vec![candidate];
+    for raw_segment in path.split('.') {
+        if raw_segment.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "invalid array filter path: {path}"
+            )));
+        }
+        let (segment, flatten) = raw_segment
+            .strip_suffix("[]")
+            .map_or((raw_segment, false), |segment| (segment, true));
+        if segment.is_empty() || segment.contains('[') || segment.contains(']') {
+            return Err(AppError::BadRequest(format!(
+                "invalid array filter path: {path}"
+            )));
+        }
+        let mut next = Vec::new();
+        for value in values {
+            let Some(child) = value.get(segment) else {
+                continue;
+            };
+            if flatten {
+                if let Some(items) = child.as_array() {
+                    next.extend(items);
+                }
+            } else {
+                next.push(child);
+            }
+        }
+        values = next;
+    }
+    Ok(values)
+}
+
+fn json_field_predicate_matches(values: &[&Value], predicate: &Value) -> AppResult<bool> {
+    let Some(operators) = predicate.as_object() else {
+        return Ok(values.iter().any(|actual| *actual == predicate));
+    };
+    if operators.is_empty() || operators.keys().any(|key| !key.starts_with('$')) {
+        return Ok(values.iter().any(|actual| *actual == predicate));
+    }
+    for (operator, expected) in operators {
+        let matched = if operator == "$ne" || operator == "$nin" || operator == "$nincludes" {
+            !values.is_empty()
+                && values.iter().all(|actual| {
+                    json_filter_operator_matches(Some(actual), operator, expected)
+                        .unwrap_or(false)
+                })
+        } else if operator == "$exists" {
+            json_filter_operator_matches(values.first().copied(), operator, expected)?
+        } else {
+            let mut matched = false;
+            for actual in values {
+                if json_filter_operator_matches(Some(actual), operator, expected)? {
+                    matched = true;
+                    break;
+                }
+            }
+            matched
+        };
+        if !matched {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn json_filter_operator_matches(
+    actual: Option<&Value>,
+    operator: &str,
+    expected: &Value,
+) -> AppResult<bool> {
+    if operator == "$exists" {
+        let should_exist = expected.as_bool().ok_or_else(|| {
+            AppError::BadRequest("$exists in array filter expects boolean".to_string())
+        })?;
+        return Ok(actual.is_some() == should_exist);
+    }
+    let Some(actual) = actual else { return Ok(false); };
+    match operator {
+        "$eq" => Ok(actual == expected),
+        "$ne" => Ok(actual != expected),
+        "$gt" | "$gte" | "$lt" | "$lte" => {
+            let ordering = json_filter_compare(actual, expected).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "{operator} in array filter requires comparable numbers or strings"
+                ))
+            })?;
+            Ok(match operator {
+                "$gt" => ordering.is_gt(),
+                "$gte" => ordering.is_ge(),
+                "$lt" => ordering.is_lt(),
+                _ => ordering.is_le(),
+            })
+        }
+        "$in" | "$nin" => {
+            let choices = expected.as_array().ok_or_else(|| {
+                AppError::BadRequest(format!("{operator} in array filter expects an array"))
+            })?;
+            if choices.is_empty() {
+                return Err(AppError::BadRequest(format!(
+                    "{operator} in array filter cannot be empty"
+                )));
+            }
+            let contains = choices.iter().any(|choice| choice == actual);
+            Ok(if operator == "$in" { contains } else { !contains })
+        }
+        "$between" => {
+            let bounds = expected.as_array().filter(|values| values.len() == 2).ok_or_else(|| {
+                AppError::BadRequest(
+                    "$between in array filter expects exactly two values".to_string(),
+                )
+            })?;
+            let lower = json_filter_compare(actual, &bounds[0]);
+            let upper = json_filter_compare(actual, &bounds[1]);
+            Ok(lower.is_some_and(|value| value.is_ge())
+                && upper.is_some_and(|value| value.is_le()))
+        }
+        "$startsWith" | "$endsWith" | "$contains" | "$ilike" | "$istartsWith"
+        | "$iendsWith" | "$icontains" => {
+            let actual = actual.as_str().ok_or_else(|| {
+                AppError::BadRequest(format!("{operator} requires a string field"))
+            })?;
+            let expected = expected.as_str().ok_or_else(|| {
+                AppError::BadRequest(format!("{operator} expects a string"))
+            })?;
+            let insensitive = operator.starts_with("$i");
+            let (actual, expected) = if insensitive {
+                (actual.to_lowercase(), expected.to_lowercase())
+            } else {
+                (actual.to_string(), expected.to_string())
+            };
+            Ok(match operator {
+                "$startsWith" | "$istartsWith" => actual.starts_with(&expected),
+                "$endsWith" | "$iendsWith" => actual.ends_with(&expected),
+                "$contains" | "$icontains" => actual.contains(&expected),
+                _ => json_like_matches(&actual, &expected),
+            })
+        }
+        "$regex" => {
+            let actual = actual.as_str().ok_or_else(|| {
+                AppError::BadRequest("$regex requires a string field".to_string())
+            })?;
+            let pattern = expected.as_str().ok_or_else(|| {
+                AppError::BadRequest("$regex expects a string".to_string())
+            })?;
+            let regex = regex_lite::Regex::new(pattern).map_err(|error| {
+                AppError::BadRequest(format!("invalid $regex in array filter: {error}"))
+            })?;
+            Ok(regex.is_match(actual))
+        }
+        "$size" => {
+            let size = actual.as_array().map(Vec::len).ok_or_else(|| {
+                AppError::BadRequest("$size requires an array field".to_string())
+            })? as i64;
+            json_size_filter_matches(size, expected)
+        }
+        "$type" => {
+            let expected = expected.as_str().ok_or_else(|| {
+                AppError::BadRequest("$type expects a string".to_string())
+            })?;
+            Ok(json_filter_type_matches(actual, expected))
+        }
+        "$includes" | "$nincludes" => {
+            let items = actual.as_array().ok_or_else(|| {
+                AppError::BadRequest(format!("{operator} requires an array field"))
+            })?;
+            let includes = items.iter().any(|item| item == expected);
+            Ok(if operator == "$includes" { includes } else { !includes })
+        }
+        "$any" | "$all" | "$none" => {
+            let items = actual.as_array().ok_or_else(|| {
+                AppError::BadRequest(format!("{operator} requires an array field"))
+            })?;
+            let expected = expected.as_array().ok_or_else(|| {
+                AppError::BadRequest(format!("{operator} expects an array"))
+            })?;
+            if expected.is_empty() {
+                return Err(AppError::BadRequest(format!(
+                    "{operator} in array filter cannot be empty"
+                )));
+            }
+            Ok(match operator {
+                "$any" => expected.iter().any(|value| items.contains(value)),
+                "$all" => expected.iter().all(|value| items.contains(value)),
+                _ => expected.iter().all(|value| !items.contains(value)),
+            })
+        }
+        "$elemMatch" => {
+            let items = actual.as_array().ok_or_else(|| {
+                AppError::BadRequest("$elemMatch requires an array field".to_string())
+            })?;
+            for item in items {
+                if json_filter_matches(item, expected)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        _ => Err(AppError::BadRequest(format!(
+            "unsupported operator in array filter: {operator}"
+        ))),
+    }
+}
+
+fn json_filter_compare(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    if let (Some(left), Some(right)) = (left.as_f64(), right.as_f64()) {
+        return left.partial_cmp(&right);
+    }
+    if let (Some(left), Some(right)) = (left.as_str(), right.as_str()) {
+        return Some(left.cmp(right));
+    }
+    None
+}
+
+fn json_size_filter_matches(size: i64, expected: &Value) -> AppResult<bool> {
+    if let Some(expected) = expected.as_i64() {
+        return Ok(size == expected);
+    }
+    let operators = expected.as_object().ok_or_else(|| {
+        AppError::BadRequest("$size expects an integer or comparison object".to_string())
+    })?;
+    for (operator, expected) in operators {
+        let expected = expected.as_i64().ok_or_else(|| {
+            AppError::BadRequest(format!("$size {operator} expects an integer"))
+        })?;
+        let matched = match operator.as_str() {
+            "$eq" => size == expected,
+            "$ne" => size != expected,
+            "$gt" => size > expected,
+            "$gte" => size >= expected,
+            "$lt" => size < expected,
+            "$lte" => size <= expected,
+            _ => {
+                return Err(AppError::BadRequest(format!(
+                    "unsupported $size operator in array filter: {operator}"
+                )));
+            }
+        };
+        if !matched {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn json_filter_type_matches(value: &Value, expected: &str) -> bool {
+    match expected {
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "string" | "text" => value.is_string(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        "null" => value.is_null(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "real" => value.as_f64().is_some() && value.as_i64().is_none() && value.as_u64().is_none(),
+        "true" => value == &Value::Bool(true),
+        "false" => value == &Value::Bool(false),
+        _ => false,
+    }
+}
+
+fn json_like_matches(value: &str, pattern: &str) -> bool {
+    let mut expression = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '%' => expression.push_str(".*"),
+            '_' => expression.push('.'),
+            other => expression.push_str(&regex_lite::escape(&other.to_string())),
+        }
+    }
+    expression.push('$');
+    regex_lite::Regex::new(&expression)
+        .map(|regex| regex.is_match(value))
+        .unwrap_or(false)
 }
 
 fn apply_single_mutation_field(
@@ -2031,6 +2517,43 @@ fn apply_single_mutation_field(
                 }
                 Ok(())
             })?;
+        }
+        "$rename" => {
+            let Some(target) = arg.as_str().map(str::trim).filter(|value| !value.is_empty()) else {
+                if strict {
+                    return Err(AppError::BadRequest(format!(
+                        "{path}: $rename expects a non-empty target path string"
+                    )));
+                }
+                return Ok(());
+            };
+            if let Err(error) = validate_projection_path(target, "$rename target") {
+                if strict {
+                    return Err(error);
+                }
+                return Ok(());
+            }
+            if matches!(target, "_id" | "_created_at" | "_modified_at")
+                || target.starts_with("_id.")
+                || target.starts_with("_created_at.")
+                || target.starts_with("_modified_at.")
+                || target.starts_with(&format!("{path}."))
+            {
+                if strict {
+                    return Err(AppError::BadRequest(format!(
+                        "{path}: invalid $rename target path: {target}"
+                    )));
+                }
+                return Ok(());
+            }
+            if target == path {
+                return Ok(());
+            }
+            let Some(value) = get_path(doc, path) else {
+                return Ok(());
+            };
+            drop_path(doc, path);
+            set_path(doc, target, value)?;
         }
         _ => {
             if strict {
@@ -2777,5 +3300,106 @@ mod transaction_tests {
             "data",
         )
         .expect("nested user fields with the same name remain valid");
+    }
+
+    #[test]
+    fn rename_moves_nested_values_and_overwrites_the_destination() {
+        let mut doc = json!({
+            "profile": {"legacy_name": "Ada", "display_name": "Old"}
+        });
+        apply_single_mutation_field(
+            &mut doc,
+            "profile.legacy_name",
+            &json!({"$rename": "profile.display_name"}),
+            true,
+        )
+        .expect("rename should succeed");
+        assert_eq!(doc, json!({"profile": {"display_name": "Ada"}}));
+    }
+
+    #[test]
+    fn rename_respects_strict_mode_and_reserved_targets() {
+        let original = json!({"name": "Ada"});
+        let mut permissive = original.clone();
+        apply_single_mutation_field(
+            &mut permissive,
+            "name",
+            &json!({"$rename": 42}),
+            false,
+        )
+        .expect("invalid permissive rename should be ignored");
+        assert_eq!(permissive, original);
+
+        let error = apply_single_mutation_field(
+            &mut permissive,
+            "name",
+            &json!({"$rename": "_id"}),
+            true,
+        )
+        .expect_err("reserved rename target should fail in strict mode");
+        assert!(error.to_string().contains("invalid $rename target"));
+    }
+
+    #[test]
+    fn positional_mutation_updates_only_nested_matching_elements() {
+        let mut doc = json!({
+            "shipments": [
+                {
+                    "status": "processing",
+                    "warehouse": {"region": "us-east"},
+                    "items": [
+                        {"sku": "A1", "qty": 2, "tags": ["priority"]},
+                        {"sku": "B2", "qty": 1, "tags": []}
+                    ]
+                },
+                {
+                    "status": "delivered",
+                    "warehouse": {"region": "us-west"},
+                    "items": [{"sku": "A1", "qty": 4, "tags": ["priority"]}]
+                }
+            ]
+        });
+        let mut patch = serde_json::Map::from_iter([
+            (
+                "shipments.$[shipment].items.$[item].qty".to_string(),
+                json!({"$inc": 1}),
+            ),
+            (
+                "shipments.$[shipment].items.$[item].tags".to_string(),
+                json!({"$addset": "reviewed"}),
+            ),
+        ]);
+        let filters = json!({
+            "shipment": {
+                "status": {"$in": ["processing", "queued"]},
+                "warehouse.region": "us-east"
+            },
+            "item": {
+                "$and": [
+                    {"qty": {"$gte": 2, "$lt": 10}},
+                    {"sku": {"$in": ["A1", "B2"]}},
+                    {"tags": {"$includes": "priority"}}
+                ]
+            }
+        });
+
+        apply_mutation_patch_to_doc(&mut doc, &mut patch, Some(&filters), true)
+            .expect("positional mutation should succeed");
+        assert_eq!(doc["shipments"][0]["items"][0]["qty"], json!(3));
+        assert_eq!(doc["shipments"][0]["items"][0]["tags"], json!(["priority", "reviewed"]));
+        assert_eq!(doc["shipments"][0]["items"][1]["qty"], json!(1));
+        assert_eq!(doc["shipments"][1]["items"][0]["qty"], json!(4));
+    }
+
+    #[test]
+    fn positional_mutation_requires_exact_filter_bindings() {
+        let mut doc = json!({"items": [{"qty": 1}]});
+        let mut patch = serde_json::Map::from_iter([(
+            "items.$[item].qty".to_string(),
+            json!({"$inc": 1}),
+        )]);
+        let error = apply_mutation_patch_to_doc(&mut doc, &mut patch, None, true)
+            .expect_err("missing array filter should fail");
+        assert!(error.to_string().contains("array_filters.item is required"));
     }
 }

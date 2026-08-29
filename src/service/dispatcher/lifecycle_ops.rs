@@ -653,7 +653,12 @@ async fn run_one_document_transition(
         expand_kdb_macros_in_value(&mut update)?;
         let update_obj = update.as_object_mut().ok_or_else(|| AppError::BadRequest("transition update must be object".to_string()))?;
         if update_requires_mutation_engine(update_obj) {
-            apply_mutation_patch_to_doc(&mut doc, update_obj, state.strict_mutation_operators)?;
+            apply_mutation_patch_to_doc(
+                &mut doc,
+                update_obj,
+                None,
+                state.strict_mutation_operators,
+            )?;
         } else {
             merge_json_patch(&mut doc, &update);
         }

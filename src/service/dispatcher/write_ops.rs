@@ -29,6 +29,7 @@ struct UpsertPreparedInputs {
     filter: Value,
     insert_data: Value,
     update_data: Value,
+    array_filters: Option<Value>,
 }
 
 fn parse_insert_common_options(payload: &OperationPayload) -> AppResult<InsertCommonOptions> {
@@ -107,6 +108,7 @@ fn prepare_upsert_inputs(payload: OperationPayload) -> AppResult<UpsertPreparedI
     }
 
     let filter = require_non_empty_filter(payload.filter)?;
+    let array_filters = payload.array_filters.clone();
     let payload_user_id = clean_optional(payload.document_user_id.clone());
     let mut insert_data = require_object(payload.insert_data, "insert_data")?;
     expand_kdb_macros_in_value(&mut insert_data)?;
@@ -133,6 +135,7 @@ fn prepare_upsert_inputs(payload: OperationPayload) -> AppResult<UpsertPreparedI
         filter,
         insert_data,
         update_data,
+        array_filters,
     })
 }
 
@@ -381,6 +384,7 @@ async fn update_inner(
     let payload = req.payload;
     let dry_run = payload.dry_run.unwrap_or(false);
     let replace = payload.replace.unwrap_or(false);
+    let array_filters = payload.array_filters.clone();
     reject_update_system_timestamps(payload.data.as_ref(), "data")?;
     if payload.ids.is_some() {
         return Err(AppError::BadRequest(
@@ -393,6 +397,11 @@ async fn update_inner(
         (None, Some(Value::Object(_))) => {
             let collection = resolve_collection_scope_optional_collection(&payload)?;
             if replace {
+                if array_filters.is_some() {
+                    return Err(AppError::BadRequest(
+                        "array_filters cannot be combined with replace=true".to_string(),
+                    ));
+                }
                 let (id, mut data) = extract_single_write_doc(payload.data, "data")?;
                 if dry_run {
                     let matched = count_by_ids(conn, collection.as_deref(), &[id]).await?;
@@ -464,7 +473,9 @@ async fn update_inner(
                 }))));
             }
             let strict = state.strict_mutation_operators;
-            let items = if update_requires_mutation_engine(data.as_object().expect("object checked")) {
+            let items = if array_filters.is_some()
+                || update_requires_mutation_engine(data.as_object().expect("object checked"))
+            {
                 let mut patch_obj = data.as_object().cloned().ok_or_else(|| {
                     AppError::BadRequest("data must be object".to_string())
                 })?;
@@ -473,6 +484,7 @@ async fn update_inner(
                     collection.as_deref(),
                     &id,
                     &mut patch_obj,
+                    array_filters.as_ref(),
                     strict,
                     state.jsonb_enabled,
                 )
@@ -540,6 +552,7 @@ async fn update_inner(
                 payload.data,
                 payload.max_docs,
                 dry_run,
+                array_filters,
             )
             .await
         }
@@ -550,7 +563,15 @@ async fn update_inner(
                 ));
             }
             let collection = resolve_collection_scope_optional_collection(&payload)?;
-            update_bulk_data_array(state, conn, collection.as_deref(), payload.data, dry_run).await
+            update_bulk_data_array(
+                state,
+                conn,
+                collection.as_deref(),
+                payload.data,
+                dry_run,
+                array_filters,
+            )
+            .await
         }
         (Some(_), Some(Value::Array(_))) => Err(AppError::BadRequest(
             "update cannot use filter when data is an array".to_string(),
@@ -644,6 +665,7 @@ async fn upsert_inner(
     let user_id = prepared.user_id;
     let mut insert_data = prepared.insert_data;
     let update_data = prepared.update_data;
+    let array_filters = prepared.array_filters;
     let filter = prepared.filter;
     let insert_id = exact_id_from_upsert_filter(&filter)?;
 
@@ -665,11 +687,13 @@ async fn upsert_inner(
         }
 
         let mut items = Vec::<Value>::new();
-        if update_requires_mutation_engine(
+        if array_filters.is_some()
+            || update_requires_mutation_engine(
             update_data
                 .as_object()
                 .ok_or_else(|| AppError::BadRequest("update_data must be object".to_string()))?,
-        ) {
+        )
+        {
             let rowids =
                 select_rowids_for_update(conn, &where_clause, binds, effective as i64).await?;
             for rowid in rowids {
@@ -681,6 +705,7 @@ async fn upsert_inner(
                     conn,
                     rowid,
                     &mut patch_obj,
+                    array_filters.as_ref(),
                     state.strict_mutation_operators,
                     state.jsonb_enabled,
                 )

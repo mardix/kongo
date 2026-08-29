@@ -75,9 +75,9 @@ export function Sidebar({ page, setPage, collapsed = false, onToggleCollapsed })
           <p className="sidebar-muted mt-3 text-xs leading-5">Choose a connection to begin. No database is opened from this level.</p>
         ) : (
           <div className="mt-3">
-            <button type="button" onClick={() => goBack(stage)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white">
+            <button type="button" onClick={() => goBack(stage, route.folder)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white">
               <span aria-hidden="true">←</span>
-              {stage === 'database' ? 'All Databases' : 'All Connections'}
+              {stage === 'database' ? 'All Databases' : route.folder ? 'Previous Folder' : 'All Connections'}
             </button>
           </div>
         )}
@@ -139,8 +139,18 @@ function CompactButton({ label, text, active = false, onClick }) {
   return <button type="button" onClick={onClick} className={`flex h-10 w-10 items-center justify-center rounded-xl text-xs font-semibold transition ${active ? 'bg-white text-slate-950' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`} title={label} aria-label={label}>{text}</button>;
 }
 
-function goBack(stage) {
-  window.location.hash = stage === 'database' ? '#crud/home' : '#home';
+function goBack(stage, folder = '') {
+  if (stage === 'database') {
+    window.location.hash = '#crud/home';
+    return;
+  }
+  if (folder) {
+    const parts = String(folder).split('/').filter(Boolean);
+    parts.pop();
+    window.location.hash = parts.length ? `#crud/home/${encodeDbForHash(parts.join('/'))}` : '#crud/home';
+    return;
+  }
+  window.location.hash = '#home';
 }
 
 function openDbSection(db, section) {
@@ -177,9 +187,10 @@ function parseCrudHash(hash) {
     const maybeTab = rest[rest.length - 1];
     const tab = databaseSections.some((item) => item.id === maybeTab) ? maybeTab : 'overview';
     const dbParts = tab === maybeTab ? rest.slice(0, -1) : rest;
-    return { db: decodeURIComponent(dbParts.join('/')), tab };
+    return { db: decodeURIComponent(dbParts.join('/')), tab, folder: '' };
   }
-  return { db: '', tab: 'overview' };
+  if (mode === 'home') return { db: '', tab: 'overview', folder: decodeURIComponent(rest.join('/')) };
+  return { db: '', tab: 'overview', folder: '' };
 }
 
 function encodeDbForHash(db) {

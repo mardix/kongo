@@ -96,7 +96,8 @@ async fn list_commands() -> AppResult<GatewayResponse> {
         "set_ttl",
         "change_namespace",
         "rename_namespace",
-        "get_stats",
+        "get_namespace_stats",
+        "get_data_count",
         "get_db_stats",
         "snapshot_db_stats",
         "query_db_stats",
@@ -713,7 +714,10 @@ async fn enable_fts_index_op(
 
 // Additional DB/admin handlers extracted from dispatcher.rs.
 
-async fn get_stats(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<GatewayResponse> {
+async fn get_namespace_stats(
+    conn: &libsql::Connection,
+    req: GatewayRequest,
+) -> AppResult<GatewayResponse> {
     let payload = req.payload;
     let collection = require_collection(&payload)?;
     let live = stats_for_table(conn, "__kdb_documents", &collection).await?;
@@ -726,6 +730,252 @@ async fn get_stats(conn: &libsql::Connection, req: GatewayRequest) -> AppResult<
         "__kdb_archive_count": __kdb_archived.0,
         "__kdb_archive_bytes": __kdb_archived.1
     }))))
+}
+
+async fn get_data_count(
+    conn: &libsql::Connection,
+    req: GatewayRequest,
+) -> AppResult<GatewayResponse> {
+    reject_operation_payload_options(&req.payload, "get_data_count")?;
+
+    let mut namespace_rows = conn
+        .query(
+            "SELECT collection,
+                    SUM(live_count), SUM(live_bytes),
+                    SUM(archive_count), SUM(archive_bytes)
+             FROM (
+                 SELECT collection, COUNT(*) AS live_count,
+                        COALESCE(SUM(_size_bytes), 0) AS live_bytes,
+                        0 AS archive_count, 0 AS archive_bytes
+                 FROM __kdb_documents GROUP BY collection
+                 UNION ALL
+                 SELECT collection, 0, 0, COUNT(*), COALESCE(SUM(_size_bytes), 0)
+                 FROM __kdb_archive GROUP BY collection
+             )
+             GROUP BY collection
+             ORDER BY collection",
+            (),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("get_data_count namespaces failed: {e}")))?;
+
+    let mut namespace_items = Vec::<Value>::new();
+    let mut documents_total = 0i64;
+    let mut documents_bytes = 0i64;
+    let mut archive_total = 0i64;
+    let mut archive_bytes = 0i64;
+    while let Some(row) = namespace_rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("get_data_count namespace row failed: {e}")))?
+    {
+        let namespace: String = row
+            .get(0)
+            .map_err(|e| AppError::Internal(format!("namespace decode failed: {e}")))?;
+        let live_count: i64 = row
+            .get(1)
+            .map_err(|e| AppError::Internal(format!("live count decode failed: {e}")))?;
+        let live_bytes: i64 = row
+            .get(2)
+            .map_err(|e| AppError::Internal(format!("live bytes decode failed: {e}")))?;
+        let archived_count: i64 = row
+            .get(3)
+            .map_err(|e| AppError::Internal(format!("archive count decode failed: {e}")))?;
+        let archived_bytes: i64 = row
+            .get(4)
+            .map_err(|e| AppError::Internal(format!("archive bytes decode failed: {e}")))?;
+        documents_total = documents_total.saturating_add(live_count);
+        documents_bytes = documents_bytes.saturating_add(live_bytes);
+        archive_total = archive_total.saturating_add(archived_count);
+        archive_bytes = archive_bytes.saturating_add(archived_bytes);
+        namespace_items.push(json!({
+            "namespace": namespace,
+            "total": live_count,
+            "archived": archived_count,
+            "size_bytes": live_bytes,
+            "archived_size_bytes": archived_bytes
+        }));
+    }
+
+    let (users_total, user_statuses) = grouped_status_counts(
+        conn,
+        "__kdb_identity_users",
+        "get_data_count users",
+    )
+    .await?;
+    let (files_total, file_statuses) =
+        grouped_status_counts(conn, "__kdb_files", "get_data_count files").await?;
+    let files_size_bytes = exact_table_sum(conn, "__kdb_files", "size_bytes").await?;
+    let metric_events = exact_table_count(conn, "__kdb_metric_events").await?;
+
+    let table_names = user_table_names(conn).await?;
+    let mut table_items = Vec::<Value>::with_capacity(table_names.len());
+    let mut table_total_rows = 0i64;
+    for table in table_names {
+        let rows = exact_table_count(conn, &table).await?;
+        table_total_rows = table_total_rows.saturating_add(rows);
+        table_items.push(json!({"name": table, "rows": rows}));
+    }
+
+    let users_active = user_statuses.get("active").copied().unwrap_or(0);
+    let users_inactive = user_statuses.get("inactive").copied().unwrap_or(0);
+    let files_active = file_statuses.get("active").copied().unwrap_or(0);
+    let files_deleted = file_statuses.get("deleted").copied().unwrap_or(0);
+
+    Ok(GatewayResponse::ok(Some(json!({
+        "documents": {
+            "total": documents_total,
+            "archived": archive_total,
+            "size_bytes": documents_bytes,
+            "archived_size_bytes": archive_bytes,
+            "namespaces": namespace_items.len(),
+            "items": namespace_items
+        },
+        "users": {
+            "total": users_total,
+            "active": users_active,
+            "inactive": users_inactive,
+            "statuses": user_statuses
+        },
+        "files": {
+            "total": files_total,
+            "active": files_active,
+            "deleted": files_deleted,
+            "size_bytes": files_size_bytes,
+            "statuses": file_statuses
+        },
+        "metrics": {"events": metric_events},
+        "tables": {
+            "count": table_items.len(),
+            "total_rows": table_total_rows,
+            "items": table_items
+        },
+        "generated_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    }))))
+}
+
+fn reject_operation_payload_options(payload: &OperationPayload, operation: &str) -> AppResult<()> {
+    let value = serde_json::to_value(payload)
+        .map_err(|e| AppError::Internal(format!("{operation} payload encode failed: {e}")))?;
+    let has_value = value
+        .as_object()
+        .map(|object| object.values().any(|value| !value.is_null()))
+        .unwrap_or(false);
+    if has_value {
+        return Err(AppError::BadRequest(format!(
+            "{operation} does not accept namespace or payload options"
+        )));
+    }
+    Ok(())
+}
+
+async fn grouped_status_counts(
+    conn: &libsql::Connection,
+    table: &str,
+    context: &str,
+) -> AppResult<(i64, BTreeMap<String, i64>)> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT status, COUNT(*) FROM {} GROUP BY status ORDER BY status",
+                quote_sql_ident(table)
+            ),
+            (),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("{context} failed: {e}")))?;
+    let mut total = 0i64;
+    let mut statuses = BTreeMap::<String, i64>::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("{context} row failed: {e}")))?
+    {
+        let status: String = row
+            .get(0)
+            .map_err(|e| AppError::Internal(format!("{context} status decode failed: {e}")))?;
+        let count: i64 = row
+            .get(1)
+            .map_err(|e| AppError::Internal(format!("{context} count decode failed: {e}")))?;
+        total = total.saturating_add(count);
+        statuses.insert(status, count);
+    }
+    Ok((total, statuses))
+}
+
+async fn exact_table_count(conn: &libsql::Connection, table: &str) -> AppResult<i64> {
+    let mut rows = conn
+        .query(
+            &format!("SELECT COUNT(*) FROM {}", quote_sql_ident(table)),
+            (),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("count table {table} failed: {e}")))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("count table {table} row failed: {e}")))?
+        .ok_or_else(|| AppError::Internal(format!("count table {table} returned no row")))?;
+    row.get(0)
+        .map_err(|e| AppError::Internal(format!("count table {table} decode failed: {e}")))
+}
+
+async fn exact_table_sum(
+    conn: &libsql::Connection,
+    table: &str,
+    column: &str,
+) -> AppResult<i64> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT COALESCE(SUM({}), 0) FROM {}",
+                quote_sql_ident(column),
+                quote_sql_ident(table)
+            ),
+            (),
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("sum {table}.{column} failed: {e}")))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("sum {table}.{column} row failed: {e}")))?
+        .ok_or_else(|| AppError::Internal(format!("sum {table}.{column} returned no row")))?;
+    row.get(0)
+        .map_err(|e| AppError::Internal(format!("sum {table}.{column} decode failed: {e}")))
+}
+
+async fn user_table_names(conn: &libsql::Connection) -> AppResult<Vec<String>> {
+    let mut rows = conn
+        .query("PRAGMA table_list", ())
+        .await
+        .map_err(|e| AppError::Internal(format!("get_data_count table list failed: {e}")))?;
+    let mut tables = Vec::<String>::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("get_data_count table list row failed: {e}")))?
+    {
+        let schema: String = row
+            .get(0)
+            .map_err(|e| AppError::Internal(format!("table schema decode failed: {e}")))?;
+        let name: String = row
+            .get(1)
+            .map_err(|e| AppError::Internal(format!("table name decode failed: {e}")))?;
+        let table_type: String = row
+            .get(2)
+            .map_err(|e| AppError::Internal(format!("table type decode failed: {e}")))?;
+        if schema == "main"
+            && table_type == "table"
+            && !name.starts_with("__kdb_")
+            && !name.starts_with("sqlite_")
+        {
+            tables.push(name);
+        }
+    }
+    tables.sort();
+    tables.dedup();
+    Ok(tables)
 }
 
 async fn get_db_stats(state: &AppState, db_path: &str) -> AppResult<GatewayResponse> {

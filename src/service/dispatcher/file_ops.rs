@@ -106,6 +106,14 @@ async fn file_query(conn: &libsql::Connection, req: GatewayRequest) -> AppResult
             libsql::Value::Text(like),
         ]);
     }
+    if let Some(filter) = payload.filter {
+        let filter = normalize_json_store_filter(filter, "metadata")?;
+        let compiled = build_where_on_base("metadata", &filter)?;
+        if compiled.sql != "1=1" {
+            clauses.push(format!("({})", compiled.sql));
+            binds.extend(compiled.binds);
+        }
+    }
 
     let where_clause = if clauses.is_empty() { "1=1".to_string() } else { clauses.join(" AND ") };
     let total_items = file_count(conn, &where_clause, binds.clone()).await?;
@@ -311,12 +319,19 @@ fn file_from_row(row: &libsql::Row) -> AppResult<Value> {
 }
 
 fn normalize_optional_file_id(id: Option<String>) -> AppResult<Option<String>> {
-    let Some(id) = clean_optional(id) else {
-        return Ok(None);
-    };
-    if id.chars().all(|c| c.is_ascii_hexdigit()) && id.len() == 32 {
-        Ok(Some(id.to_ascii_lowercase()))
-    } else {
-        Err(AppError::BadRequest("id must be a 32-character dashless uuid string".to_string()))
+    Ok(clean_optional(id))
+}
+
+#[cfg(test)]
+mod file_id_tests {
+    use super::normalize_optional_file_id;
+
+    #[test]
+    fn file_ids_accept_and_preserve_custom_values() {
+        assert_eq!(
+            normalize_optional_file_id(Some("  media/Legacy-001  ".to_string())).unwrap(),
+            Some("media/Legacy-001".to_string())
+        );
+        assert_eq!(normalize_optional_file_id(Some("   ".to_string())).unwrap(), None);
     }
 }

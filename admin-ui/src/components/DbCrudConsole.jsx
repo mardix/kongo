@@ -105,6 +105,7 @@ export function DbCrudConsole() {
   const [presetOpen, setPresetOpen] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [dbStats, setDbStats] = useState(null);
+  const [dataCount, setDataCount] = useState(null);
   const [dbStatsRollups, setDbStatsRollups] = useState([]);
   const [entryModal, setEntryModal] = useState(null);
   const [namespaceTabs, setNamespaceTabs] = useState([]);
@@ -329,11 +330,13 @@ export function DbCrudConsole() {
   async function loadDbStats() {
     if (!activeDb) return showToast('Select a DB first', true);
     return runStatusCall(async () => {
-      const [live, history] = await Promise.all([
+      const [live, history, inventory] = await Promise.all([
         gateway({ db: activeDb, operation: 'get_db_stats', payload: {} }),
-        gateway({ db: activeDb, operation: 'query_db_stats', payload: { limit: 50 } })
+        gateway({ db: activeDb, operation: 'query_db_stats', payload: { limit: 50 } }),
+        gateway({ db: activeDb, operation: 'get_data_count', payload: {} })
       ]);
       setDbStats(live?.data || null);
+      setDataCount(inventory?.data || null);
       setDbStatsRollups(extractArray(history, ['data.items', 'items']));
       return live;
     });
@@ -927,6 +930,7 @@ export function DbCrudConsole() {
     return (
       <DbHome
         connectionName={settings.name}
+        folderPath={route.folder}
         dbs={dbs}
         newDb={newDb}
         setNewDb={setNewDb}
@@ -954,6 +958,7 @@ export function DbCrudConsole() {
           dbInfo={activeDbInfo}
           namespaces={activeNamespaces}
           stats={dbStats}
+          dataCount={dataCount}
           onOpen={selectDbTab}
           onRefresh={() => Promise.all([listNamespaces(), loadDbStats()])}
         />
@@ -977,6 +982,7 @@ export function DbCrudConsole() {
           dbInfo={activeDbInfo}
           namespaces={activeNamespaces}
           stats={dbStats}
+          dataCount={dataCount}
           rollups={dbStatsRollups}
           onRefresh={loadDbStats}
           onSnapshot={snapshotDbStats}
@@ -1258,8 +1264,7 @@ function connectionHost(origin) {
   }
 }
 
-function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, inventoryMeta, refreshing, openCreateModal, createModalOpen, createDb, closeCreateModal, refreshDbs, selectDb }) {
-  const [folderPath, setFolderPath] = useState('');
+function DbHome({ connectionName, folderPath = '', dbs, newDb, setNewDb, dbSearch, setDbSearch, inventoryMeta, refreshing, openCreateModal, createModalOpen, createDb, closeCreateModal, refreshDbs, selectDb }) {
   const [filter, setFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -1272,6 +1277,7 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
     });
   }, [dbs, filter, term]);
   const folderView = useMemo(() => buildDbFolderView(filtered, folderPath), [filtered, folderPath]);
+  const directoryTree = useMemo(() => buildDbDirectoryTree(dbs.filter((db) => dbMatchesFilter(db, filter))), [dbs, filter]);
   const visibleDbs = term ? filtered : folderView.dbs;
   const totalPages = Math.max(1, Math.ceil(visibleDbs.length / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -1291,8 +1297,14 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
   }
 
   function openFolder(path) {
-    setFolderPath(path);
     setPage(1);
+    const normalized = String(path || '').replace(/^\/+|\/+$/g, '');
+    window.location.hash = normalized ? `#crud/home/${encodeDbForHash(normalized)}` : '#crud/home';
+  }
+
+  function browseFolder(path) {
+    setDbSearch('');
+    openFolder(path);
   }
 
   return (
@@ -1301,7 +1313,7 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
         <div className="flex flex-col gap-5 border-b border-slate-300 px-5 py-5 lg:flex-row lg:items-start lg:justify-between lg:px-6">
           <div>
             <h2 className="text-xl font-bold tracking-tight text-slate-950">Database Inventory</h2>
-            <p className="mt-1 text-sm text-slate-600">Cached per host in this browser. Search, folders, filters, and pagination are handled locally.</p>
+            <p className="mt-1 text-sm text-slate-600">Browse the host inventory like a filesystem. UUID names are grouped automatically by two hex-prefix levels.</p>
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-3 lg:justify-end">
             <div className="flex items-center divide-x divide-slate-300 text-sm text-slate-600">
@@ -1317,7 +1329,7 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
           </div>
         </div>
 
-        <div className="border-b border-slate-300 px-5 py-5 lg:px-6">
+        <div className="border-b border-slate-300 px-5 py-4 lg:px-6">
           <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-end">
             <Field label="Search all DB paths" value={dbSearch} onChange={updateSearch} placeholder="tenant, projects/db0.main, prod" />
             <div className="flex flex-wrap gap-2" aria-label="Database filters">
@@ -1328,44 +1340,30 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
           </div>
         </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-300 bg-slate-50 px-5 py-3 lg:px-6">
-            <div className="flex min-w-0 flex-1 items-center gap-3">
-              <button
-                type="button"
-                onClick={() => openFolder(parentDbFolder(folderPath))}
-                disabled={!folderPath || Boolean(term)}
-                className="btn-secondary shrink-0"
-                title="Open parent folder"
-              >
-                Up
-              </button>
-              <DbBreadcrumb path={folderPath} onOpen={openFolder} disabled={Boolean(term)} />
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center justify-end gap-3 text-xs text-slate-600">
-              <span>{refreshing ? 'Refreshing...' : inventoryMeta?.cached_at ? `Cached ${formatRelativeTime(inventoryMeta.cached_at)}` : 'No cache yet'}</span>
-              {inventoryMeta?.host_key ? <code className="hidden max-w-md truncate rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] text-slate-600 xl:inline" title={inventoryMeta.host_key}>{inventoryMeta.host_key}</code> : null}
-            </div>
-          </div>
-
-          {!term && folderView.folders.length ? (
-            <section className="border-b border-slate-300">
-              <div className="grid grid-cols-[minmax(0,1fr)_100px_90px] items-center gap-4 border-b border-slate-300 bg-slate-50 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-600 md:grid-cols-[minmax(0,1fr)_140px_160px_90px] lg:px-6">
-                <span>Name</span>
-                <span>Type</span>
-                <span className="hidden md:block">Contents</span>
-                <span className="text-right">Action</span>
+          <div className="grid min-h-[520px] lg:grid-cols-[280px_minmax(0,1fr)]">
+            <aside className="border-b border-slate-300 bg-slate-50 lg:border-b-0 lg:border-r">
+              <div className="flex items-center justify-between border-b border-slate-300 px-4 py-3">
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-[0.16em] text-slate-700">Directories</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">{directoryTree.count} databases</p>
+                </div>
+                <button type="button" onClick={() => browseFolder('')} className="text-xs font-bold text-primary hover:underline">Root</button>
               </div>
-              {folderView.folders.map((folder) => (
-                <FolderBrowserRow key={folder.path} folder={folder} onOpen={() => openFolder(folder.path)} />
-              ))}
-            </section>
-          ) : null}
+              <DbDirectoryTree tree={directoryTree} selectedPath={folderPath} onOpen={browseFolder} />
+            </aside>
 
-          {!term && !folderView.folders.length && !folderView.dbs.length ? (
-            <div className="border-b border-slate-300 px-5 py-6 text-sm text-slate-600 lg:px-6">This folder is empty.</div>
-          ) : null}
+            <section className="min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-300 bg-slate-50 px-5 py-2.5 lg:px-6">
+                <div className="flex min-w-0 flex-1 items-center gap-3">
+                  <button type="button" onClick={() => browseFolder(parentDbFolder(folderPath))} disabled={!folderPath || Boolean(term)} className="btn-secondary shrink-0" title="Open parent directory">Up</button>
+                  <DbBreadcrumb path={folderPath} onOpen={browseFolder} disabled={Boolean(term)} />
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center justify-end gap-3 text-xs text-slate-600">
+                  <span>{refreshing ? 'Refreshing...' : inventoryMeta?.cached_at ? `Updated ${formatRelativeTime(inventoryMeta.cached_at)}` : 'Not refreshed yet'}</span>
+                  {inventoryMeta?.host_key ? <code className="hidden max-w-xs truncate rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] text-slate-600 2xl:inline" title={inventoryMeta.host_key}>{inventoryMeta.host_key}</code> : null}
+                </div>
+              </div>
 
-          <section>
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-300 px-5 py-4 lg:px-6">
               <div>
                 <h3 className="text-base font-bold text-slate-950">{term ? 'Search Results' : `Databases${folderPath ? ` in /${folderPath}` : ''}`}</h3>
@@ -1377,7 +1375,7 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
             </div>
             {pageItems.length ? (
               <div>
-                <div className="hidden grid-cols-[minmax(0,1fr)_100px_170px_120px_70px] items-center gap-4 border-b border-slate-300 bg-slate-50 px-5 py-3 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-600 md:grid lg:px-6">
+                <div className="hidden grid-cols-[minmax(0,1fr)_100px_150px_120px_76px] items-center gap-4 border-b border-slate-300 bg-slate-50 px-5 py-2.5 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-600 md:grid lg:px-6">
                   <span>Database</span>
                   <span>Size</span>
                   <span>Storage</span>
@@ -1390,7 +1388,7 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
               </div>
             ) : (
               <div className="px-5 py-8 lg:px-6">
-                <EmptyCards message={!term && folderView.folders.length ? 'Open a folder above to browse its databases.' : dbs.length ? 'No databases match this search or filter.' : 'No DBs found yet. Create one or refresh the inventory.'} />
+                <EmptyCards message={dbs.length ? (term ? 'No databases match this search or filter.' : 'This directory has no databases. Select a child directory from the explorer.') : 'No DBs found yet. Create one or refresh the inventory.'} />
               </div>
             )}
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-300 bg-slate-50 px-5 py-4 text-sm text-slate-700 lg:px-6">
@@ -1400,7 +1398,8 @@ function DbHome({ connectionName, dbs, newDb, setNewDb, dbSearch, setDbSearch, i
                 <button type="button" onClick={() => setPage(Math.min(totalPages, safePage + 1))} disabled={safePage >= totalPages} className="btn-secondary">Next</button>
               </div>
             </div>
-          </section>
+            </section>
+          </div>
       </section>
 
       {createModalOpen ? (
@@ -1474,6 +1473,7 @@ function DbRow({ db, onOpen }) {
 function DbBrowserRow({ db, onOpen }) {
   const path = dbLabel(db);
   const name = path.split('/').filter(Boolean).pop() || path;
+  const folder = dbInventoryParentPath(db);
   const loaded = isLoadedDb(db);
   const onLocal = truthy(db.on_local);
   const onS3 = truthy(db.on_s3);
@@ -1482,11 +1482,16 @@ function DbBrowserRow({ db, onOpen }) {
     <button
       type="button"
       onClick={onOpen}
-      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-slate-200 px-5 py-4 text-left transition last:border-b-0 hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_100px_170px_120px_70px] lg:px-6"
+      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-slate-200 px-5 py-3.5 text-left transition-colors last:border-b-0 hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_100px_150px_120px_76px] lg:px-6"
     >
-      <span className="min-w-0">
-        <span className="block truncate font-mono text-base font-bold text-slate-950 group-hover:text-primary">{name}</span>
-        <span className="mt-0.5 block truncate font-mono text-sm text-slate-600">{path}</span>
+      <span className="flex min-w-0 items-center gap-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-sky-200 bg-sky-50" aria-hidden="true">
+          <span className="h-3.5 w-4 rounded-sm border-2 border-sky-700 border-t-[3px]" />
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate font-mono text-sm font-bold text-slate-950 group-hover:text-primary">{name}</span>
+          <span className="mt-0.5 block truncate font-mono text-xs text-slate-600" title={path}>{folder ? `/${folder}` : '/'} · {path}</span>
+        </span>
       </span>
       <span className="hidden font-mono text-sm font-semibold text-slate-800 md:block">{formatBytes(db.local_size_bytes ?? db.size_bytes)}</span>
       <span className="hidden flex-wrap items-center gap-1.5 md:flex">
@@ -1529,73 +1534,137 @@ function DbBreadcrumb({ path, onOpen, disabled }) {
   );
 }
 
-function FolderBrowserRow({ folder, onOpen }) {
+function DbDirectoryTree({ tree, selectedPath, onOpen }) {
+  const [expanded, setExpanded] = useState(() => new Set(selectedPathAncestors(selectedPath)));
+
+  useEffect(() => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      selectedPathAncestors(selectedPath).forEach((path) => next.add(path));
+      return next;
+    });
+  }, [selectedPath]);
+
+  function toggle(path) {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="group grid w-full grid-cols-[minmax(0,1fr)_100px_90px] items-center gap-4 border-b border-slate-200 px-5 py-4 text-left last:border-b-0 transition hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_140px_160px_90px] lg:px-6"
-    >
-      <span className="min-w-0">
-        <span className="block truncate font-mono text-base font-bold text-slate-950 group-hover:text-primary">{folder.name}</span>
-        <span className="mt-0.5 block truncate font-mono text-sm text-slate-600">/{folder.path}</span>
-      </span>
-      <span className="text-sm font-medium text-slate-700">Folder</span>
-      <span className="hidden text-sm text-slate-600 md:block">{folder.count} database{folder.count === 1 ? '' : 's'}</span>
-      <span className="text-right text-sm font-bold text-primary">Open</span>
-    </button>
+    <div className="max-h-[340px] overflow-auto p-2 lg:max-h-[650px]">
+      <button type="button" onClick={() => onOpen('')} className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm font-bold transition-colors ${!selectedPath ? 'bg-white text-slate-950 ring-1 ring-slate-300' : 'text-slate-700 hover:bg-white'}`}>
+        <span className="flex h-6 w-6 items-center justify-center rounded border border-slate-300 bg-white text-xs text-slate-600" aria-hidden="true">/</span>
+        <span className="min-w-0 flex-1 truncate">All Databases</span>
+        <span className="font-mono text-xs text-slate-500">{tree.count}</span>
+      </button>
+      <div className="mt-1">
+        {tree.children.map((node) => (
+          <DbDirectoryNode key={node.path} node={node} selectedPath={selectedPath} expanded={expanded} onToggle={toggle} onOpen={onOpen} depth={0} />
+        ))}
+      </div>
+    </div>
   );
 }
 
-function DbOverviewPanel({ db, dbInfo, namespaces, stats, onOpen, onRefresh }) {
-  const liveEntries = namespaces.reduce((sum, item) => sum + Number(item.live_count ?? item.count ?? 0), 0);
-  const archivedEntries = namespaces.reduce((sum, item) => sum + Number(item.__kdb_archive_count ?? item.archive_count ?? 0), 0);
-  const liveBytes = namespaces.reduce((sum, item) => sum + Number(item.live_bytes ?? item.size_bytes ?? 0), 0);
+function DbDirectoryNode({ node, selectedPath, expanded, onToggle, onOpen, depth }) {
+  const isExpanded = expanded.has(node.path);
+  const selected = selectedPath === node.path;
+  return (
+    <div>
+      <div className={`group flex items-center rounded-md ${selected ? 'bg-white ring-1 ring-slate-300' : 'hover:bg-white'}`} style={{ paddingLeft: `${Math.min(depth, 8) * 14}px` }}>
+        <button type="button" onClick={() => onToggle(node.path)} className="flex h-8 w-7 shrink-0 items-center justify-center text-xs font-bold text-slate-500" aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${node.name}`}>
+          <span aria-hidden="true">{node.children.length ? (isExpanded ? '▾' : '▸') : '·'}</span>
+        </button>
+        <button type="button" onClick={() => onOpen(node.path)} className="flex min-w-0 flex-1 items-center gap-2 py-2 pr-2 text-left">
+          <span className="relative h-4 w-5 shrink-0" aria-hidden="true">
+            <span className="absolute left-0 top-0 h-1.5 w-2.5 rounded-t-sm bg-amber-500" />
+            <span className="absolute bottom-0 left-0 h-3.5 w-5 rounded-sm border border-amber-600 bg-amber-100" />
+          </span>
+          <span className={`min-w-0 flex-1 truncate font-mono text-xs ${selected ? 'font-bold text-slate-950' : 'font-semibold text-slate-700'}`} title={node.path}>{node.name}</span>
+          <span className="font-mono text-[11px] text-slate-500">{node.count}</span>
+        </button>
+      </div>
+      {isExpanded ? node.children.map((child) => (
+        <DbDirectoryNode key={child.path} node={child} selectedPath={selectedPath} expanded={expanded} onToggle={onToggle} onOpen={onOpen} depth={depth + 1} />
+      )) : null}
+    </div>
+  );
+}
+
+function DbOverviewPanel({ db, dbInfo, namespaces, stats, dataCount, onOpen, onRefresh }) {
+  const liveEntries = Number(dataCount?.documents?.total ?? namespaces.reduce((sum, item) => sum + Number(item.live_count ?? item.count ?? 0), 0));
+  const liveBytes = Number(dataCount?.documents?.size_bytes ?? namespaces.reduce((sum, item) => sum + Number(item.live_bytes ?? item.size_bytes ?? 0), 0));
+  const namespaceCount = Number(dataCount?.documents?.namespaces ?? namespaces.length);
+  const identityCount = Number(dataCount?.users?.total ?? 0);
+  const activeIdentityCount = Number(dataCount?.users?.active ?? 0);
+  const fileCount = Number(dataCount?.files?.total ?? 0);
+  const fileBytes = Number(dataCount?.files?.size_bytes ?? 0);
+  const metricEventCount = Number(dataCount?.metrics?.events ?? 0);
+  const sqlTableCount = Number(dataCount?.tables?.count ?? 0);
+  const sqlRowCount = Number(dataCount?.tables?.total_rows ?? 0);
+  const totalDataCount = liveEntries + identityCount + fileCount + metricEventCount + sqlRowCount;
   const requestCount = Number(stats?.requests_total || 0);
   const errorCount = Number(stats?.errors_total || 0);
   const errorRate = requestCount > 0 ? `${((errorCount / requestCount) * 100).toFixed(1)}%` : '0%';
   const storage = [truthy(dbInfo?.on_local) ? 'Local' : '', truthy(dbInfo?.on_s3) ? 'S3' : ''].filter(Boolean).join(' + ') || 'Unavailable';
   const tools = [
-    { id: 'crud', title: 'DocumentDB', description: 'Browse namespaces, query documents, and create or update records.' },
-    { id: 'identity', title: 'Identity', description: 'Manage users, providers, tokens, status, and identity events.' },
-    { id: 'files', title: 'Files', description: 'Track file metadata, owners, storage paths, and lifecycle state.' },
-    { id: 'metrics', title: 'Metrics', description: 'Ingest metric events and query time-bucketed aggregates.' },
+    { id: 'crud', title: 'DocumentDB', description: 'Browse namespaces, query documents, and create or update records.', value: formatNumber(liveEntries), detail: `${formatNumber(namespaceCount)} namespaces` },
+    { id: 'identity', title: 'Identity', description: 'Manage users, providers, tokens, status, and identity events.', value: formatNumber(identityCount), detail: `${formatNumber(activeIdentityCount)} active` },
+    { id: 'files', title: 'Files', description: 'Track file metadata, owners, storage paths, and lifecycle state.', value: formatNumber(fileCount), detail: formatBytes(fileBytes) },
+    { id: 'metrics', title: 'Metrics', description: 'Ingest metric events and query time-bucketed aggregates.', value: formatNumber(metricEventCount), detail: 'events' },
     { id: 'fts', title: 'FTSearch', description: 'Search indexed documents and manage full-text index lifecycle.' },
     { id: 'audit', title: 'Audit Logs', description: 'Browse and append immutable actor and resource activity.' },
-    { id: 'sqlite', title: 'SQLiteDB', description: 'Browse tables, inspect schema, edit rows, and execute SQL.' }
+    { id: 'sqlite', title: 'SQLiteDB', description: 'Browse tables, inspect schema, edit rows, and execute SQL.', value: formatNumber(sqlTableCount), detail: `${formatNumber(sqlRowCount)} rows` }
   ];
 
   return (
     <section className="space-y-4">
-      <section className="overflow-hidden rounded-xl border border-slate-300 bg-white">
-        <div className="flex flex-col gap-5 px-6 py-6 md:flex-row md:items-start md:justify-between lg:px-7">
+      <section className="overflow-hidden rounded-2xl border border-slate-300 bg-slate-50">
+        <div className="flex flex-col gap-6 bg-white px-6 py-7 md:flex-row md:items-start md:justify-between lg:px-8 lg:py-8">
           <div className="min-w-0">
-            <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Database Overview</div>
-            <h2 className="mt-3 break-all font-mono text-2xl font-bold tracking-tight text-slate-950 lg:text-3xl">{db}</h2>
-            <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-slate-600">
-              <span>Status <strong className="ml-1 text-slate-950">{truthy(dbInfo?.loaded) ? 'Loaded' : 'Not Loaded'}</strong></span>
-              <span className="hidden h-5 w-px bg-slate-300 sm:block" aria-hidden="true" />
-              <span>Storage <strong className="ml-1 text-slate-950">{storage}</strong></span>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Database Overview</div>
+              <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${truthy(dbInfo?.loaded) ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                {truthy(dbInfo?.loaded) ? 'Loaded' : 'Not Loaded'}
+              </span>
+            </div>
+            <h2 className="mt-4 break-all font-mono text-xl font-bold leading-tight tracking-tight text-slate-950 lg:text-2xl">{db}</h2>
+            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-600">
+              <span className="rounded-md border border-slate-300 bg-slate-50 px-2.5 py-1.5">Storage</span>
+              <span className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-slate-800">{storage}</span>
+              <span className="ml-1 text-slate-400">Live database workspace</span>
             </div>
           </div>
-          <button type="button" onClick={onRefresh} className="btn-secondary shrink-0">Refresh</button>
+          <button type="button" onClick={onRefresh} className="btn-secondary shrink-0 self-start">Refresh Overview</button>
         </div>
 
         <div className="grid border-t border-slate-300 lg:grid-cols-2">
-          <div className="px-6 py-6 lg:border-r lg:border-slate-300 lg:px-7">
-            <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Inventory</h3>
-            <div className="mt-6 grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-4">
-              <OverviewMetric label="Namespaces" value={formatNumber(namespaces.length)} />
-              <OverviewMetric label="Live Documents" value={formatNumber(liveEntries)} />
-              <OverviewMetric label="Archived" value={formatNumber(archivedEntries)} muted={archivedEntries === 0} />
-              <OverviewMetric label="On Disk" value={formatBytes(dbInfo?.local_size_bytes ?? dbInfo?.size_bytes ?? liveBytes)} />
+          <div className="px-6 py-7 lg:border-r lg:px-8">
+            <div className="flex items-end justify-between gap-3">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Inventory</h3>
+                <p className="mt-1 text-sm text-slate-600">Data currently managed by this database.</p>
+              </div>
+              <span className="font-mono text-xs font-semibold text-slate-500">{formatBytes(dbInfo?.local_size_bytes ?? dbInfo?.size_bytes ?? liveBytes)}</span>
+            </div>
+            <div className="mt-6 grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-3 xl:grid-cols-5">
+              <OverviewMetric label="Total Data" value={formatNumber(totalDataCount)} />
+              <OverviewMetric label="Documents" value={formatNumber(liveEntries)} />
+              <OverviewMetric label="Identities" value={formatNumber(identityCount)} />
+              <OverviewMetric label="Files" value={formatNumber(fileCount)} />
+              <OverviewMetric label="Database Size" value={formatBytes(dbInfo?.local_size_bytes ?? dbInfo?.size_bytes ?? liveBytes)} />
             </div>
           </div>
-          <div className="border-t border-slate-300 bg-slate-50/70 px-6 py-6 lg:border-t-0 lg:px-7">
+          <div className="border-t border-slate-300 bg-white px-6 py-7 lg:border-t-0 lg:px-8">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Traffic</h3>
-              <span className="text-xs font-medium text-slate-600">Current runtime</span>
+              <span className="rounded-md border border-slate-300 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-600">Current runtime</span>
             </div>
+            <p className="mt-1 text-sm text-slate-600">Requests handled by this instance.</p>
             <div className="mt-6 grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-4">
               <OverviewMetric label="Requests" value={formatNumber(requestCount)} />
               <OverviewMetric label="Reads" value={formatNumber(stats?.reads_total)} />
@@ -1608,14 +1677,18 @@ function DbOverviewPanel({ db, dbInfo, namespaces, stats, onOpen, onRefresh }) {
 
       <section>
         <div className="mb-4">
-          <h3 className="text-xl font-bold tracking-tight text-slate-950">Workspaces</h3>
+          <h3 className="text-lg font-bold tracking-tight text-slate-950">Workspaces</h3>
           <p className="mt-1 text-sm font-medium text-slate-600">Every workspace stays scoped to <span className="font-mono font-semibold text-slate-800">{db}</span>.</p>
         </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {tools.map((tool) => (
-            <button key={tool.id} type="button" onClick={() => onOpen(tool.id)} className="min-h-40 rounded-xl border border-slate-300 bg-white p-5 text-left transition hover:border-slate-500 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/30">
-              <h4 className="text-lg font-bold tracking-tight text-slate-950">{tool.title}</h4>
+            <button key={tool.id} type="button" onClick={() => onOpen(tool.id)} className="group min-h-40 rounded-xl border border-slate-300 bg-white p-5 text-left transition-colors hover:border-slate-500 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/30">
+              <div className="flex items-start justify-between gap-3">
+                <h4 className="text-base font-bold tracking-tight text-slate-950 group-hover:text-primary">{tool.title}</h4>
+                {tool.value !== undefined ? <span className="font-mono text-xl font-bold leading-none text-slate-950">{tool.value}</span> : null}
+              </div>
               <p className="mt-2 text-sm font-medium leading-6 text-slate-600">{tool.description}</p>
+              {tool.detail ? <div className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">{tool.detail}</div> : null}
             </button>
           ))}
           <div className="min-h-40 rounded-xl border border-dashed border-slate-400 bg-transparent p-5">
@@ -1637,7 +1710,7 @@ function OverviewMetric({ label, value, muted = false, danger = false }) {
   const labelTone = danger ? 'text-rose-700' : 'text-slate-600';
   return (
     <div className="min-w-0">
-      <div className={`break-words font-mono text-3xl font-bold leading-none tracking-tight ${valueTone}`}>{value ?? 'n/a'}</div>
+      <div className={`break-words font-mono text-xl font-bold leading-none tracking-tight ${valueTone}`}>{value ?? 'n/a'}</div>
       <div className={`mt-3 text-sm font-medium ${labelTone}`}>{label}</div>
     </div>
   );
@@ -3315,10 +3388,11 @@ function CheckboxField({ label, checked, onChange }) {
   );
 }
 
-function DbStatsPanel({ db, dbInfo, namespaces, stats, rollups, onRefresh, onSnapshot }) {
-  const totalLiveEntries = namespaces.reduce((sum, item) => sum + Number(item.live_count ?? item.count ?? 0), 0);
-  const totalArchiveEntries = namespaces.reduce((sum, item) => sum + Number(item.__kdb_archive_count ?? item.archive_count ?? 0), 0);
-  const totalLiveBytes = namespaces.reduce((sum, item) => sum + Number(item.live_bytes ?? item.size_bytes ?? 0), 0);
+function DbStatsPanel({ db, dbInfo, namespaces, stats, dataCount, rollups, onRefresh, onSnapshot }) {
+  const totalLiveEntries = Number(dataCount?.documents?.total ?? namespaces.reduce((sum, item) => sum + Number(item.live_count ?? item.count ?? 0), 0));
+  const totalArchiveEntries = Number(dataCount?.documents?.archived ?? namespaces.reduce((sum, item) => sum + Number(item.__kdb_archive_count ?? item.archive_count ?? 0), 0));
+  const totalLiveBytes = Number(dataCount?.documents?.size_bytes ?? namespaces.reduce((sum, item) => sum + Number(item.live_bytes ?? item.size_bytes ?? 0), 0));
+  const namespaceCount = Number(dataCount?.documents?.namespaces ?? namespaces.length);
   const latest = rollups[rollups.length - 1] || null;
   const previous = rollups[rollups.length - 2] || null;
   const delta = latest && previous ? {
@@ -3342,7 +3416,7 @@ function DbStatsPanel({ db, dbInfo, namespaces, stats, rollups, onRefresh, onSna
           </div>
         </div>
         <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatsTile label="Namespaces" value={formatNumber(namespaces.length)} />
+          <StatsTile label="Namespaces" value={formatNumber(namespaceCount)} />
           <StatsTile label="Live entries" value={formatNumber(totalLiveEntries)} />
           <StatsTile label="Archive entries" value={formatNumber(totalArchiveEntries)} />
           <StatsTile label="DB size on disk" value={formatBytes(dbInfo?.local_size_bytes ?? dbInfo?.size_bytes ?? totalLiveBytes)} />
@@ -3350,6 +3424,36 @@ function DbStatsPanel({ db, dbInfo, namespaces, stats, rollups, onRefresh, onSna
           <StatsTile label="On S3" value={truthyLabel(dbInfo?.on_s3)} />
           <StatsTile label="Loaded" value={truthyLabel(dbInfo?.loaded)} />
           <StatsTile label="Live data bytes" value={formatBytes(totalLiveBytes)} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="border-b border-slate-200 px-4 py-3">
+          <h3 className="text-sm font-semibold text-slate-950">Stored data count</h3>
+          <p className="text-xs text-slate-500">Exact current inventory across Kongo products and user-created SQLite tables.</p>
+        </div>
+        <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-5">
+          <StatsTile label="Users" value={formatNumber(dataCount?.users?.total)} />
+          <StatsTile label="Active users" value={formatNumber(dataCount?.users?.active)} />
+          <StatsTile label="Files" value={formatNumber(dataCount?.files?.total)} />
+          <StatsTile label="Metric events" value={formatNumber(dataCount?.metrics?.events)} />
+          <StatsTile label="SQL table rows" value={formatNumber(dataCount?.tables?.total_rows)} />
+        </div>
+        <div className="grid gap-4 border-t border-slate-200 p-4 xl:grid-cols-2">
+          <DataCountList
+            title="Namespace counts"
+            items={dataCount?.documents?.items || []}
+            primaryKey="namespace"
+            valueKey="total"
+            secondaryKey="archived"
+            secondaryLabel="archived"
+          />
+          <DataCountList
+            title="User-created tables"
+            items={dataCount?.tables?.items || []}
+            primaryKey="name"
+            valueKey="rows"
+          />
         </div>
       </section>
 
@@ -3409,6 +3513,28 @@ function DbStatsPanel({ db, dbInfo, namespaces, stats, rollups, onRefresh, onSna
         </div>
       </section>
     </section>
+  );
+}
+
+function DataCountList({ title, items, primaryKey, valueKey, secondaryKey = null, secondaryLabel = '' }) {
+  return (
+    <div className="overflow-hidden rounded-xl border border-slate-200">
+      <div className="flex items-center justify-between bg-slate-50 px-3 py-2">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-600">{title}</h4>
+        <span className="font-mono text-xs text-slate-500">{items.length}</span>
+      </div>
+      <div className="max-h-64 divide-y divide-slate-100 overflow-auto">
+        {items.length ? items.map((item) => (
+          <div key={item[primaryKey]} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+            <span className="truncate font-mono text-slate-800" title={String(item[primaryKey])}>{item[primaryKey]}</span>
+            <span className="shrink-0 font-mono font-semibold text-slate-700">
+              {formatNumber(item[valueKey])}
+              {secondaryKey ? <span className="ml-2 font-normal text-slate-400">{formatNumber(item[secondaryKey])} {secondaryLabel}</span> : null}
+            </span>
+          </div>
+        )) : <div className="px-3 py-6 text-center text-xs text-slate-500">No data</div>}
+      </div>
+    </div>
   );
 }
 
@@ -4364,7 +4490,7 @@ function IdentityUserForm({ mode, form, onChange }) {
         <p className="mt-1 text-xs text-slate-400">Kongo stores identity metadata; authentication remains in the application layer.</p>
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        <Field label="Identity Id" value={form.user_id} onChange={(user_id) => onChange({ user_id })} placeholder={isAdd ? 'Optional dashless UUID' : 'Identity id'} disabled={!isAdd} />
+        <Field label="Identity Id" value={form.user_id} onChange={(user_id) => onChange({ user_id })} placeholder={isAdd ? 'Optional; UUID generated when empty' : 'Identity id'} disabled={!isAdd} />
         <Field label="Email" value={form.email} onChange={(email) => onChange({ email })} placeholder="user@example.com" />
         <Field label="Username" value={form.username} onChange={(username) => onChange({ username })} placeholder="username" />
         <Field label="Phone" value={form.phone} onChange={(phone) => onChange({ phone })} placeholder="+15551234567" />
@@ -5516,7 +5642,7 @@ function buildDbFolderView(dbs, folderPath) {
   const folders = new Map();
   const rows = [];
   for (const db of dbs) {
-    const path = dbLabel(db).replace(/^\/+|\/+$/g, '');
+    const path = dbInventoryPath(db);
     if (!path) continue;
     if (prefix && !path.startsWith(prefix)) continue;
     const rest = prefix ? path.slice(prefix.length) : path;
@@ -5535,6 +5661,58 @@ function buildDbFolderView(dbs, folderPath) {
     folders: [...folders.values()].sort((a, b) => a.name.localeCompare(b.name)),
     dbs: rows.sort((a, b) => dbLabel(a).localeCompare(dbLabel(b)))
   };
+}
+
+function buildDbDirectoryTree(dbs) {
+  const root = { name: '', path: '', count: 0, children: new Map() };
+  for (const db of dbs) {
+    const parts = dbInventoryPath(db).split('/').filter(Boolean);
+    parts.pop();
+    root.count += 1;
+    let parent = root;
+    const pathParts = [];
+    for (const name of parts) {
+      pathParts.push(name);
+      const path = pathParts.join('/');
+      if (!parent.children.has(name)) parent.children.set(name, { name, path, count: 0, children: new Map() });
+      parent = parent.children.get(name);
+      parent.count += 1;
+    }
+  }
+
+  function normalize(node) {
+    return {
+      ...node,
+      children: [...node.children.values()]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(normalize)
+    };
+  }
+  return normalize(root);
+}
+
+function selectedPathAncestors(path) {
+  const parts = String(path || '').split('/').filter(Boolean);
+  return parts.map((_, index) => parts.slice(0, index + 1).join('/'));
+}
+
+function dbInventoryPath(db) {
+  const logicalPath = dbLabel(db).replace(/^\/+|\/+$/g, '');
+  if (!logicalPath) return '';
+
+  const parts = logicalPath.split('/').filter(Boolean);
+  const name = parts.pop();
+  const uuidStem = String(name || '').match(/^([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\..+)?$/i)?.[1] || '';
+  const compactUuid = uuidStem.replaceAll('-', '').toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(compactUuid)) return logicalPath;
+
+  return [...parts, compactUuid.slice(0, 1), compactUuid.slice(0, 2), name].join('/');
+}
+
+function dbInventoryParentPath(db) {
+  const parts = dbInventoryPath(db).split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
 }
 
 function parentDbFolder(folderPath) {
@@ -5956,7 +6134,10 @@ function parseCrudHash(hash) {
     const dbParts = tab === maybeTab ? rest.slice(0, -1) : rest;
     return { mode: 'db', db: decodeURIComponent(dbParts.join('/')), tab };
   }
-  return { mode: 'home', db: '', tab: 'overview' };
+  if (mode === 'home') {
+    return { mode: 'home', db: '', tab: 'overview', folder: decodeURIComponent(rest.join('/')) };
+  }
+  return { mode: 'home', db: '', tab: 'overview', folder: '' };
 }
 
 function encodeDbForHash(db) {

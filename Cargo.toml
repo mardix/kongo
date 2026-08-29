@@ -1,6 +1,6 @@
 [package]
 name = "kongo"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 
 [dependencies]
@@ -25,3 +25,4 @@ async-recursion = "1"
 zstd = "0.13"
 pulldown-cmark = "0.12"
 memory-stats = "1.2"
+regex-lite = "0.1"

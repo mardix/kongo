@@ -73,7 +73,8 @@ CREATE_USER="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/jso
     "email":"password-change@example.com",
     "first_name":"Password",
     "last_name":"Change",
-    "requires_password_change":true
+    "requires_password_change":true,
+    "data":{"plan":"pro","tags":["beta"]}
   }
 }')"
 assert_contains "$CREATE_USER" '"status":"success"' "user_create should succeed"
@@ -83,6 +84,9 @@ USER_ID="$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' <<<"$CREATE_USER")"
 
 LIST_USERS="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"identity/main","operation":"user_query","payload":{}}')"
 assert_contains "$LIST_USERS" '"requires_password_change":true' "user_query should return the enabled flag"
+
+FILTERED_USERS="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"identity/main","operation":"user_query","payload":{"filter":{"data.plan":"pro","data.tags":{"$includes":"beta"}}}}')"
+assert_contains "$FILTERED_USERS" '"password-change@example.com"' "user_query should filter nested identity data"
 
 echo "[6/7] clear password-change requirement"
 UPDATE_USER="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d "{\"db\":\"identity/main\",\"operation\":\"user_update\",\"payload\":{\"user_id\":\"$USER_ID\",\"requires_password_change\":false}}")"

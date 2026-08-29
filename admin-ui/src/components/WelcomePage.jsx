@@ -52,31 +52,49 @@ export function WelcomePage({ setPage }) {
 
       <section className="panel">
         <div className="panel-header-row">
-          <div>
-            <h2 className="text-base font-semibold text-slate-950">Connections</h2>
-            <p className="mt-1 text-sm text-slate-500">Connection profiles are stored only in this browser.</p>
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-slate-50 font-mono text-sm font-black text-slate-700" aria-hidden="true">
+              {connections.length}
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-slate-950">Saved Connections</h2>
+              <p className="mt-1 text-sm font-medium text-slate-600">Private to this browser. Select a host to open its database inventory.</p>
+            </div>
           </div>
           <button type="button" onClick={() => setPage('settings')} className="btn-secondary">Add Connection</button>
         </div>
 
         {connections.length ? (
-          <div>
+          <div className="divide-y divide-slate-200">
             {connections.map((connection) => {
               const active = connection.id === activeConnectionId;
               const pending = connection.id === connectingId;
               return (
-                <article key={connection.id} className="grid gap-4 border-b border-slate-200 px-5 py-5 last:border-b-0 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="truncate text-base font-bold text-slate-950">{connection.settings.name || 'Connection'}</h3>
-                      {active ? <span className="text-xs font-bold uppercase tracking-[0.14em] text-slate-600">Last Used</span> : null}
+                <article key={connection.id} className="group grid gap-4 px-5 py-4 transition-colors hover:bg-slate-50/80 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+                  <div className="flex min-w-0 items-center gap-4">
+                    <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border font-mono text-sm font-black ${active ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-600'}`} aria-hidden="true">
+                      {connectionInitial(connection.settings)}
                     </div>
-                    <p className="mt-1 truncate font-mono text-sm text-slate-600">{connectionEndpoint(connection.settings)}</p>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="truncate text-base font-bold text-slate-950">{connection.settings.name || 'Connection'}</h3>
+                        {active ? <span className="rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-700">Current</span> : null}
+                      </div>
+                      <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="truncate font-mono text-sm font-semibold text-slate-700" title={connectionEndpoint(connection.settings)}>{connectionEndpoint(connection.settings)}</span>
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500">
+                          <span className="h-1.5 w-1.5 rounded-full bg-slate-400" aria-hidden="true" />
+                          Verified before opening
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-4 md:justify-end">
-                    <span className="text-sm font-medium text-slate-600">Ping is checked before opening.</span>
-                    <button type="button" onClick={() => connect(connection.id)} disabled={Boolean(connectingId)} className="btn-primary">
-                      {pending ? 'Connecting...' : 'Connect'}
+                  <div className="flex items-center gap-2 pl-14 md:pl-0">
+                    <button type="button" onClick={() => setPage('settings')} className="btn-secondary">
+                      Manage
+                    </button>
+                    <button type="button" onClick={() => connect(connection.id)} disabled={Boolean(connectingId)} className="btn-primary min-w-28">
+                      {pending ? 'Connecting...' : active ? 'Open' : 'Connect'}
                     </button>
                   </div>
                 </article>
@@ -144,4 +162,15 @@ function connectionEndpoint(settings) {
   const server = String(settings?.serverUrl || '').replace(/\/+$/, '');
   const path = `/${String(settings?.basePath || '/_/kdb').replace(/^\/+|\/+$/g, '')}`;
   return `${server}${path}`;
+}
+
+function connectionInitial(settings) {
+  const name = String(settings?.name || '').trim();
+  if (name) return name.charAt(0).toUpperCase();
+
+  try {
+    return new URL(String(settings?.serverUrl || '')).hostname.charAt(0).toUpperCase() || 'K';
+  } catch {
+    return 'K';
+  }
 }
