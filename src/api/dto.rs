@@ -143,6 +143,7 @@ pub struct OperationPayload {
     pub older_than_secs: Option<i64>,
     pub allow_system_timestamps: Option<bool>,
     pub include_system_timestamps: Option<bool>,
+    pub include_metadata: Option<bool>,
     #[serde(alias = "include_name")]
     pub include_namespace: Option<bool>,
     pub compute: Option<Value>,

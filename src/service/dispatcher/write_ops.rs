@@ -30,6 +30,7 @@ struct UpsertPreparedInputs {
     insert_data: Value,
     update_data: Value,
     array_filters: Option<Value>,
+    metadata: Option<String>,
 }
 
 fn parse_insert_common_options(payload: &OperationPayload) -> AppResult<InsertCommonOptions> {
@@ -39,6 +40,18 @@ fn parse_insert_common_options(payload: &OperationPayload) -> AppResult<InsertCo
         unique_fields: normalize_unique_fields(payload.unique_fields.clone())?,
         on_conflict: parse_insert_on_conflict(payload.on_conflict.as_deref())?,
     })
+}
+
+fn normalize_document_metadata(metadata: Option<Value>) -> AppResult<Option<String>> {
+    let Some(metadata) = metadata else {
+        return Ok(None);
+    };
+    if !metadata.is_object() {
+        return Err(AppError::BadRequest(
+            "metadata must be an object".to_string(),
+        ));
+    }
+    Ok(Some(metadata.to_string()))
 }
 
 fn prepare_insert_documents(data: Option<Value>, bulk: bool) -> AppResult<PreparedInsertDocuments> {
@@ -109,6 +122,7 @@ fn prepare_upsert_inputs(payload: OperationPayload) -> AppResult<UpsertPreparedI
 
     let filter = require_non_empty_filter(payload.filter)?;
     let array_filters = payload.array_filters.clone();
+    let metadata = normalize_document_metadata(payload.metadata.clone())?;
     let payload_user_id = clean_optional(payload.document_user_id.clone());
     let mut insert_data = require_object(payload.insert_data, "insert_data")?;
     expand_kdb_macros_in_value(&mut insert_data)?;
@@ -136,6 +150,7 @@ fn prepare_upsert_inputs(payload: OperationPayload) -> AppResult<UpsertPreparedI
         insert_data,
         update_data,
         array_filters,
+        metadata,
     })
 }
 
@@ -184,6 +199,7 @@ async fn insert(
     let ttl_seconds = payload.ttl_seconds;
     let payload_user_id = clean_optional(payload.document_user_id.clone());
     let expiry_behavior = normalized_expiry_behavior(payload.expiry_behavior.as_deref());
+    let metadata = normalize_document_metadata(payload.metadata.clone())?;
     let mut docs = prepare_insert_documents(payload.data, bulk)?.docs;
     let mut doc_user_ids = Vec::<Option<String>>::with_capacity(docs.len());
     for doc in &mut docs {
@@ -253,13 +269,14 @@ async fn insert(
         let data_expr = json_input_expr(state.jsonb_enabled);
         tx.execute(
             &format!(
-                "INSERT INTO __kdb_documents (id, collection, _user_id, data, _size_bytes, _expires_at, _expiry_behavior, _created_at, _modified_at)
-                 VALUES (?, ?, ?, {data_expr}, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
+                "INSERT INTO __kdb_documents (id, collection, _user_id, _metadata, data, _size_bytes, _expires_at, _expiry_behavior, _created_at, _modified_at)
+                 VALUES (?, ?, ?, {data_expr}, {data_expr}, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
             ),
             libsql::params![
                 id.to_string(),
                 collection.clone(),
                 to_sql_nullable_text(user_id.clone()),
+                to_sql_nullable_text(metadata.clone()),
                 data,
                 size,
                 expires_at,
@@ -666,6 +683,7 @@ async fn upsert_inner(
     let mut insert_data = prepared.insert_data;
     let update_data = prepared.update_data;
     let array_filters = prepared.array_filters;
+    let metadata = prepared.metadata;
     let filter = prepared.filter;
     let insert_id = exact_id_from_upsert_filter(&filter)?;
 
@@ -795,12 +813,13 @@ async fn upsert_inner(
     let data_expr = json_input_expr(state.jsonb_enabled);
     conn.execute(
         &format!(
-            "INSERT INTO __kdb_documents (id, collection, _user_id, data, _size_bytes, _expires_at, _expiry_behavior) VALUES (?, ?, ?, {data_expr}, ?, ?, ?)"
+            "INSERT INTO __kdb_documents (id, collection, _user_id, _metadata, data, _size_bytes, _expires_at, _expiry_behavior) VALUES (?, ?, ?, {data_expr}, {data_expr}, ?, ?, ?)"
         ),
         libsql::params![
             new_id.to_string(),
             insert_collection.clone(),
             to_sql_nullable_text(user_id),
+            to_sql_nullable_text(metadata),
             data,
             size,
             insert_expires_at,

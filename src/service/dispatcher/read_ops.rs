@@ -242,6 +242,7 @@ async fn execute_query_inner(
         .include_namespace
         .unwrap_or(state.response_include_namespace)
         || namespace_scope_force_include(&namespace_scope);
+    let include_metadata = payload.include_metadata.unwrap_or(false);
     let observed_paths = observed_query_paths(&payload);
     if !observed_paths.is_empty() {
         let _ = bump_query_heatmap(conn, &observed_paths).await;
@@ -289,16 +290,16 @@ async fn execute_query_inner(
 
     let sql = match (include_namespace, state.response_include_system_timestamps) {
         (true, true) => format!(
-            "SELECT json(data), _user_id, collection, _created_at, _modified_at FROM {source} WHERE {where_clause} ORDER BY {order_by} LIMIT ? OFFSET ?"
+            "SELECT json(data), _user_id, collection, _created_at, _modified_at, json(_metadata) FROM {source} WHERE {where_clause} ORDER BY {order_by} LIMIT ? OFFSET ?"
         ),
         (true, false) => format!(
-            "SELECT json(data), _user_id, collection FROM {source} WHERE {where_clause} ORDER BY {order_by} LIMIT ? OFFSET ?"
+            "SELECT json(data), _user_id, collection, json(_metadata) FROM {source} WHERE {where_clause} ORDER BY {order_by} LIMIT ? OFFSET ?"
         ),
         (false, true) => format!(
-            "SELECT json(data), _user_id, _created_at, _modified_at FROM {source} WHERE {where_clause} ORDER BY {order_by} LIMIT ? OFFSET ?"
+            "SELECT json(data), _user_id, _created_at, _modified_at, json(_metadata) FROM {source} WHERE {where_clause} ORDER BY {order_by} LIMIT ? OFFSET ?"
         ),
         (false, false) => format!(
-            "SELECT json(data), _user_id FROM {source} WHERE {where_clause} ORDER BY {order_by} LIMIT ? OFFSET ?"
+            "SELECT json(data), _user_id, json(_metadata) FROM {source} WHERE {where_clause} ORDER BY {order_by} LIMIT ? OFFSET ?"
         ),
     };
 
@@ -340,6 +341,21 @@ async fn execute_query_inner(
                 .get(idx + 1)
                 .map_err(|e| AppError::Internal(format!("query modified_at decode failed: {e}")))?;
             attach_system_timestamps(&mut value, created_at, modified_at);
+        }
+        if include_metadata {
+            let metadata_index = 2
+                + usize::from(include_namespace)
+                + 2 * usize::from(state.response_include_system_timestamps);
+            let metadata: Option<String> = row.get(metadata_index as i32).map_err(|e| {
+                AppError::Internal(format!("query metadata decode failed: {e}"))
+            })?;
+            if let Some(metadata) = metadata {
+                if let Ok(metadata) = serde_json::from_str::<Value>(&metadata) {
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert("_metadata".to_string(), metadata);
+                    }
+                }
+            }
         }
         out.push(value);
     }
@@ -704,6 +720,7 @@ async fn execute_query_fts(
         .include_namespace
         .unwrap_or(state.response_include_namespace)
         || namespace_scope_force_include(&namespace_scope);
+    let include_metadata = payload.include_metadata.unwrap_or(false);
     if payload.include_archive.unwrap_or(false) || payload.archive_only.unwrap_or(false) {
         return Err(AppError::BadRequest(
             "full-text query supports live documents only".to_string(),
@@ -784,12 +801,13 @@ async fn execute_query_fts(
                        d.collection AS _namespace,
                        d._created_at AS _created_at,
                        d._modified_at AS _modified_at,
-                       bm25(__kdb_documents_fts) AS _score
+                       bm25(__kdb_documents_fts) AS _score,
+                       json(d._metadata) AS _metadata
                 FROM __kdb_documents_fts
                 JOIN __kdb_documents d ON d.id = __kdb_documents_fts.id
                 WHERE __kdb_documents_fts.content MATCH ? AND {where_clause}
             )
-            SELECT data, _user_id, _namespace, _created_at, _modified_at, _score
+            SELECT data, _user_id, _namespace, _created_at, _modified_at, _score, _metadata
             FROM matched
             ORDER BY {order_by}
             LIMIT ? OFFSET ?"
@@ -801,12 +819,13 @@ async fn execute_query_fts(
                        d._user_id AS _user_id,
                        d._created_at AS _created_at,
                        d._modified_at AS _modified_at,
-                       bm25(__kdb_documents_fts) AS _score
+                       bm25(__kdb_documents_fts) AS _score,
+                       json(d._metadata) AS _metadata
                 FROM __kdb_documents_fts
                 JOIN __kdb_documents d ON d.id = __kdb_documents_fts.id
                 WHERE __kdb_documents_fts.content MATCH ? AND {where_clause}
             )
-            SELECT data, _user_id, _created_at, _modified_at, _score
+            SELECT data, _user_id, _created_at, _modified_at, _score, _metadata
             FROM matched
             ORDER BY {order_by}
             LIMIT ? OFFSET ?"
@@ -817,12 +836,13 @@ async fn execute_query_fts(
                 SELECT json(d.data) AS data,
                        d._user_id AS _user_id,
                        d.collection AS _namespace,
-                       bm25(__kdb_documents_fts) AS _score
+                       bm25(__kdb_documents_fts) AS _score,
+                       json(d._metadata) AS _metadata
                 FROM __kdb_documents_fts
                 JOIN __kdb_documents d ON d.id = __kdb_documents_fts.id
                 WHERE __kdb_documents_fts.content MATCH ? AND {where_clause}
             )
-            SELECT data, _user_id, _namespace, _score
+            SELECT data, _user_id, _namespace, _score, _metadata
             FROM matched
             ORDER BY {order_by}
             LIMIT ? OFFSET ?"
@@ -832,12 +852,13 @@ async fn execute_query_fts(
             "WITH matched AS (
                 SELECT json(d.data) AS data,
                        d._user_id AS _user_id,
-                       bm25(__kdb_documents_fts) AS _score
+                       bm25(__kdb_documents_fts) AS _score,
+                       json(d._metadata) AS _metadata
                 FROM __kdb_documents_fts
                 JOIN __kdb_documents d ON d.id = __kdb_documents_fts.id
                 WHERE __kdb_documents_fts.content MATCH ? AND {where_clause}
             )
-            SELECT data, _user_id, _score
+            SELECT data, _user_id, _score, _metadata
             FROM matched
             ORDER BY {order_by}
             LIMIT ? OFFSET ?"
@@ -882,6 +903,25 @@ async fn execute_query_fts(
                 AppError::Internal(format!("search modified_at decode failed: {e}"))
             })?;
             attach_system_timestamps(&mut value, created_at, modified_at);
+        }
+        if include_metadata {
+            let metadata_index = if include_namespace {
+                if state.response_include_system_timestamps { 5 } else { 4 }
+            } else if state.response_include_system_timestamps {
+                4
+            } else {
+                3
+            };
+            let metadata: Option<String> = row.get(metadata_index).map_err(|e| {
+                AppError::Internal(format!("search metadata decode failed: {e}"))
+            })?;
+            if let Some(metadata) = metadata {
+                if let Ok(metadata) = serde_json::from_str::<Value>(&metadata) {
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert("_metadata".to_string(), metadata);
+                    }
+                }
+            }
         }
         let score_idx = if state.response_include_system_timestamps {
             idx + 2

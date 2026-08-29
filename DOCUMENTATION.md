@@ -292,6 +292,7 @@ Use this table as the quick reference for common payload keys and their meanings
 | `allow_system_timestamps` | bool | Allow input `_created_at`/`_modified_at` where supported |
 | `include_system_timestamps` | bool | Export toggle for system timestamps |
 | `include_namespace` | bool | Include `_namespace` in query response items (alias: `include_name`) |
+| `include_metadata` | bool | Explicitly include the document `_metadata` object in `get`, `query`, or `search` responses. Hidden by default. |
 | `compute` | object | Compute spec (`aggregate`/`query`) |
 | `group_by` | string\\|array | Metric Events grouping fields; aggregate grouping is reserved |
 | `lookups` | object | Lookup/join map |
@@ -588,7 +589,7 @@ Use Mutation Operators to transform existing document values.
 
 | Operation | Required Field | Description |
 |---|---|---|
-| `Mutate value` | Exact single-key operator object | `$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`, `$rename` |
+| `Mutate value` | Exact single-key operator object | `$replace`, `$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`, `$rename` |
 
 ### Lookup Match Operators (`payload.lookups`)
 Use Lookup Match Operators to describe the direction of a document relationship.
@@ -665,6 +666,7 @@ Creates one or many new JSON documents in one namespace. Use `insert` when the r
 |---|---:|---:|---|
 | `data` | object or object[] | Required | Document body or bodies. Every item must be an object. |
 | `_user_id` | string | None | Stores an Identity user reference in the document table column rather than inside JSON `data`. It may also be supplied per document. |
+| `metadata` | object | None | Stores hidden document metadata in the `_metadata` JSON/JSONB column. It is not returned unless a read requests `include_metadata:true`. |
 | `ttl_seconds` | int | None | Positive lifetime for the new document. The reaper processes it after expiration. |
 | `expiry_behavior` | string | `archive` | `archive` moves an expired document to the archive; `delete` removes it permanently. Unknown values normalize to `archive`. |
 | `lifecycle` | object or object[] | None | On a single-document insert, atomically creates one or more named scheduled conditional transitions. |
@@ -779,6 +781,8 @@ Use this form for idempotent creates based on an application key such as tenant 
 Changes documents that already exist. Use it when the caller knows a document `_id`, has an array of explicit document IDs, or intentionally wants to patch every record matched by a filter. `update` never inserts a missing document.
 
 By default, update data is a JSON merge patch: supplied fields are changed, untouched fields remain, and nested objects update nested values. Mutation Operators provide path-aware transformations for counters and arrays; their field keys may use dot notation.
+
+The same patch behavior applies to Identity `user_update.data` and File `file_update.metadata`. Supplying an object changes only the supplied paths and preserves other paths. Use `$replace` when the complete object at a path must be replaced. `$replace` can be used at the root of `data`/`metadata` or at any nested path, and its operand must be an object.
 
 ##### Accepted Shapes
 
@@ -1314,6 +1318,7 @@ Use `query` when you need document bodies, pagination, sorting, field projection
 | `fields` | string[] | All | Includes only selected paths. `_id`, `_user_id`, and an automatically included `_namespace` are retained when present. |
 | `exclude_fields` | string[] | `[]` | Removes selected paths after inclusion. `_id`, `_user_id`, and an included `_namespace` cannot be excluded. |
 | `include_namespace` | bool | Configured response setting | Adds `_namespace` to items. Alias: `include_name`. Automatically enabled for multi/all namespace reads. |
+| `include_metadata` | bool | `false` | Includes the hidden `_metadata` object as `_metadata` in returned items. |
 | `include_archive` | bool | `false` | Reads live and archived documents. Not available in FTS mode. |
 | `archive_only` | bool | `false` | Reads archived documents only. Not available in FTS mode. |
 | `lookups` | object | None | Named lookup map for joining related documents. |
@@ -3414,6 +3419,7 @@ Mutation Operators are intended for `update`. They operate on the current stored
 
 | Operator | Operand | Behavior | Example |
 |---|---|---|---|
+| `$replace` | Object | Replaces the complete object at the target path instead of patching it. Works at the root or any nested path. | `"claims":{"$replace":{"roles":["new-role"]}}` |
 | `$unset` | `true` | Removes the field completely. Other operands are ignored in permissive mode. | `"profile.legacy":{"$unset":true}` |
 | `$inc` | `true` or signed number | Adds the operand; `true` means `1`. Missing or null fields start at the delta. | `"score":{"$inc":-2}` |
 | `$push` | Any value | Appends one value to an array. Missing or null fields become arrays. | `"events":{"$push":{"type":"login"}}` |
@@ -4120,6 +4126,8 @@ Fetches one Identity user together with linked providers, available login method
 #### `user_update`
 Update one identity profile. `requires_password_change` accepts both `true` and `false`, allowing the application to set the requirement and clear it after a successful password change.
 
+`data` is patched when supplied: omitted fields remain unchanged, including nested fields. Use `{"data":{"$replace":{...}}}` to replace the entire identity data object. Mutation Operators, including `$replace`, may also be used at nested paths.
+
 ```json
 {
   "db": "app/main",
@@ -4444,6 +4452,8 @@ Update mutable metadata.
   - `filename`, `content_type`, `size_bytes`, `sha256`
   - `status`, `owner_type`, `owner_id`
   - `metadata`, `uploaded_at`, `expires_at`
+
+`metadata` is patched when supplied: omitted fields remain unchanged. Use `{"metadata":{"$replace":{...}}}` to replace the entire file metadata object. `$replace` can also target nested metadata paths.
 
 Example:
 ```json

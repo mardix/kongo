@@ -462,16 +462,18 @@ async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
     let size = data.len() as i64;
     let expires_at = ttl_to_expires_at(payload.ttl_seconds)?;
     let expiry_behavior = normalized_expiry_behavior(payload.expiry_behavior.as_deref());
+    let metadata = normalize_document_metadata(payload.metadata.clone())?;
 
     let data_expr = json_input_expr(jsonb_enabled());
     tx.execute(
         &format!(
-            "INSERT INTO __kdb_documents (id, collection, data, _size_bytes, _expires_at, _expiry_behavior, _created_at, _modified_at)
-             VALUES (?, ?, {data_expr}, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
+            "INSERT INTO __kdb_documents (id, collection, _metadata, data, _size_bytes, _expires_at, _expiry_behavior, _created_at, _modified_at)
+             VALUES (?, ?, {data_expr}, {data_expr}, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
         ),
         libsql::params![
             id.clone(),
             collection.clone(),
+            to_sql_nullable_text(metadata),
             data,
             size,
             expires_at,
@@ -689,8 +691,8 @@ async fn tx_delete(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
 
     tx.execute(
         &format!(
-            "INSERT INTO __kdb_archive (id, collection, _user_id, data, _size_bytes, _created_at, _modified_at, _txn_id, _expires_at)
-             SELECT id, collection, _user_id, data, _size_bytes, _created_at, _modified_at, ?, ?
+            "INSERT INTO __kdb_archive (id, collection, _user_id, _metadata, data, _size_bytes, _created_at, _modified_at, _txn_id, _expires_at)
+             SELECT id, collection, _user_id, _metadata, data, _size_bytes, _created_at, _modified_at, ?, ?
              FROM __kdb_documents WHERE {}",
             where_clause
         ),
@@ -771,8 +773,8 @@ async fn __kdb_archive_and_delete_ids(
 
     tx.execute(
         &format!(
-            "INSERT INTO __kdb_archive (id, collection, _user_id, data, _size_bytes, _created_at, _modified_at, _txn_id, _expires_at)
-             SELECT id, collection, _user_id, data, _size_bytes, _created_at, _modified_at, ?, ?
+            "INSERT INTO __kdb_archive (id, collection, _user_id, _metadata, data, _size_bytes, _created_at, _modified_at, _txn_id, _expires_at)
+             SELECT id, collection, _user_id, _metadata, data, _size_bytes, _created_at, _modified_at, ?, ?
              FROM __kdb_documents
              WHERE {}",
             where_clause
@@ -1919,6 +1921,44 @@ fn apply_mutation_patch_to_doc(
     Ok(())
 }
 
+/// Applies document-style mutations to an application-owned JSON object.
+/// A sole `$replace` operator is handled as an explicit whole-object replacement.
+fn apply_json_object_update(
+    current: Value,
+    incoming: Value,
+    field_name: &str,
+    strict: bool,
+) -> AppResult<Value> {
+    let incoming = incoming
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest(format!("{field_name} must be an object")))?;
+
+    if let Some(replacement) = incoming.get("$replace") {
+        if incoming.len() != 1 {
+            return Err(AppError::BadRequest(format!(
+                "{field_name}.$replace cannot be combined with other fields"
+            )));
+        }
+        let mut replacement = replacement.clone();
+        if !replacement.is_object() {
+            return Err(AppError::BadRequest(format!(
+                "{field_name}.$replace must be an object"
+            )));
+        }
+        expand_kdb_macros_in_value(&mut replacement)?;
+        return Ok(replacement);
+    }
+
+    let mut result = if current.is_object() {
+        current
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+    let mut patch = incoming.clone();
+    apply_mutation_patch_to_doc(&mut result, &mut patch, None, strict)?;
+    Ok(result)
+}
+
 fn is_positional_selector(segment: &str) -> bool {
     segment.starts_with("$[") && segment.ends_with(']')
 }
@@ -2424,6 +2464,19 @@ fn apply_single_mutation_field(
     }
 
     match op.as_str() {
+        "$replace" => {
+            if !arg.is_object() {
+                if strict {
+                    return Err(AppError::BadRequest(format!(
+                        "{path}: $replace expects an object"
+                    )));
+                }
+                return Ok(());
+            }
+            let mut replacement = arg.clone();
+            expand_kdb_macros_in_value(&mut replacement)?;
+            set_path(doc, path, replacement)?;
+        }
         "$unset" => {
             if arg == &Value::Bool(true) {
                 drop_path(doc, path);
@@ -3401,5 +3454,26 @@ mod transaction_tests {
         let error = apply_mutation_patch_to_doc(&mut doc, &mut patch, None, true)
             .expect_err("missing array filter should fail");
         assert!(error.to_string().contains("array_filters.item is required"));
+    }
+
+    #[test]
+    fn replace_mutation_replaces_root_or_nested_object() {
+        let mut doc = json!({
+            "data": {"claims": {"roles": ["old"], "scope": "read"}},
+            "profile": {"name": "Ada", "legacy": true}
+        });
+        let mut patch = serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+            "data": {"$replace": {"claims": {"roles": ["new"]}}},
+            "profile.legacy": {"$replace": {"removed": true}}
+        }))
+        .unwrap();
+        apply_mutation_patch_to_doc(&mut doc, &mut patch, None, true).unwrap();
+        assert_eq!(
+            doc,
+            json!({
+                "data": {"claims": {"roles": ["new"]}},
+                "profile": {"name": "Ada", "legacy": {"removed": true}}
+            })
+        );
     }
 }

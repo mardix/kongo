@@ -256,7 +256,7 @@ async fn restore_kdb_archive(
     let mut rows = tx
         .query(
             &format!(
-                "SELECT id, collection, _user_id, json(data), _size_bytes, _expires_at, _created_at, _modified_at
+                "SELECT id, collection, _user_id, json(_metadata), json(data), _size_bytes, _expires_at, _created_at, _modified_at
                  FROM __kdb_archive WHERE {where_clause}"
             ),
             binds,
@@ -280,20 +280,23 @@ async fn restore_kdb_archive(
             user_id: row
                 .get(2)
                 .map_err(|e| AppError::Internal(format!("restore _user_id decode failed: {e}")))?,
-            data: row
+            metadata: row
                 .get(3)
+                .map_err(|e| AppError::Internal(format!("restore metadata decode failed: {e}")))?,
+            data: row
+                .get(4)
                 .map_err(|e| AppError::Internal(format!("restore data decode failed: {e}")))?,
             size_bytes: row
-                .get(4)
+                .get(5)
                 .map_err(|e| AppError::Internal(format!("restore size decode failed: {e}")))?,
             expires_at: row
-                .get(5)
+                .get(6)
                 .map_err(|e| AppError::Internal(format!("restore expires decode failed: {e}")))?,
             created_at: row
-                .get(6)
+                .get(7)
                 .map_err(|e| AppError::Internal(format!("restore created decode failed: {e}")))?,
             modified_at: row
-                .get(7)
+                .get(8)
                 .map_err(|e| AppError::Internal(format!("restore modified decode failed: {e}")))?,
         });
     }
@@ -335,6 +338,7 @@ async fn restore_kdb_archive(
                 "UPDATE __kdb_documents
                  SET collection = ?,
                      _user_id = ?,
+                     _metadata = ?,
                      data = ?,
                      _size_bytes = ?,
                      _expires_at = ?,
@@ -345,6 +349,7 @@ async fn restore_kdb_archive(
                 libsql::params![
                     row.collection.clone(),
                     to_sql_nullable_text(row.user_id.clone()),
+                    to_sql_nullable_text(row.metadata.clone()),
                     row.data.clone(),
                     row.size_bytes,
                     row.expires_at,
@@ -364,6 +369,7 @@ async fn restore_kdb_archive(
                     "UPDATE __kdb_documents
                      SET data = {patch_expr},
                          _user_id = COALESCE(?, _user_id),
+                         _metadata = COALESCE(?, _metadata),
                          _size_bytes = length({patch_expr}),
                          _expires_at = ?,
                          _expiry_behavior = 'archive',
@@ -373,6 +379,7 @@ async fn restore_kdb_archive(
                 libsql::params![
                     row.data.clone(),
                     to_sql_nullable_text(row.user_id.clone()),
+                    to_sql_nullable_text(row.metadata.clone()),
                     row.data.clone(),
                     row.expires_at,
                     row.id.clone()
@@ -384,13 +391,14 @@ async fn restore_kdb_archive(
             let data_expr = json_input_expr(jsonb_enabled());
             tx.execute(
                 &format!(
-                    "INSERT INTO __kdb_documents (id, collection, _user_id, data, _size_bytes, _expires_at, _expiry_behavior, _created_at, _modified_at)
-                     VALUES (?, ?, ?, {data_expr}, ?, ?, 'archive', ?, ?)"
+                    "INSERT INTO __kdb_documents (id, collection, _user_id, _metadata, data, _size_bytes, _expires_at, _expiry_behavior, _created_at, _modified_at)
+                     VALUES (?, ?, ?, {data_expr}, {data_expr}, ?, ?, 'archive', ?, ?)"
                 ),
                 libsql::params![
                     row.id.clone(),
                     row.collection.clone(),
                     to_sql_nullable_text(row.user_id.clone()),
+                    to_sql_nullable_text(row.metadata.clone()),
                     row.data.clone(),
                     row.size_bytes,
                     row.expires_at,
@@ -429,6 +437,7 @@ struct ArchiveRow {
     id: String,
     collection: String,
     user_id: Option<String>,
+    metadata: Option<String>,
     data: String,
     size_bytes: i64,
     expires_at: Option<i64>,

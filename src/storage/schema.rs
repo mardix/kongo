@@ -5,7 +5,7 @@ use tokio::time::{Duration, sleep};
 
 use crate::error::{AppError, AppResult};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 1;
+pub const LATEST_SCHEMA_VERSION: i64 = 2;
 
 pub const INIT_SQL: &str = r#"
 PRAGMA auto_vacuum = INCREMENTAL;
@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS __kdb_documents (
     id TEXT PRIMARY KEY,
     collection TEXT NOT NULL,
     _user_id TEXT,
+    _metadata ANY,
     data ANY NOT NULL,
     _size_bytes INTEGER,
     _expires_at INTEGER,
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS __kdb_archive (
     id TEXT,
     collection TEXT,
     _user_id TEXT,
+    _metadata ANY,
     data ANY,
     _size_bytes INTEGER,
     _created_at TEXT,
@@ -456,6 +458,64 @@ async fn ensure_identity_schema(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+/// Adds document metadata columns to databases created before schema version 2.
+async fn ensure_document_metadata_schema(conn: &Connection) -> AppResult<()> {
+    let mut rows = conn
+        .query("PRAGMA table_info('__kdb_documents')", ())
+        .await
+        .map_err(|e| AppError::Internal(format!("document schema inspect failed: {e}")))?;
+    let mut has_documents_metadata = false;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("document schema row read failed: {e}")))?
+    {
+        let name: String = row.get(1).map_err(|e| {
+            AppError::Internal(format!("document schema column decode failed: {e}"))
+        })?;
+        if name == "_metadata" {
+            has_documents_metadata = true;
+            break;
+        }
+    }
+    drop(rows);
+    if !has_documents_metadata {
+        conn.execute("ALTER TABLE __kdb_documents ADD COLUMN _metadata ANY", ())
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("document metadata schema update failed: {e}"))
+            })?;
+    }
+
+    let mut rows = conn
+        .query("PRAGMA table_info('__kdb_archive')", ())
+        .await
+        .map_err(|e| AppError::Internal(format!("archive schema inspect failed: {e}")))?;
+    let mut has_archive_metadata = false;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("archive schema row read failed: {e}")))?
+    {
+        let name: String = row
+            .get(1)
+            .map_err(|e| AppError::Internal(format!("archive schema column decode failed: {e}")))?;
+        if name == "_metadata" {
+            has_archive_metadata = true;
+            break;
+        }
+    }
+    drop(rows);
+    if !has_archive_metadata {
+        conn.execute("ALTER TABLE __kdb_archive ADD COLUMN _metadata ANY", ())
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("archive metadata schema update failed: {e}"))
+            })?;
+    }
+    Ok(())
+}
+
 /// Initializes schema and system metadata with retry/backoff for transient sqlite lock contention.
 pub async fn init_schema_with_retry(conn: &Connection, default_fts_enabled: bool) -> AppResult<()> {
     const MAX_ATTEMPTS: usize = 8;
@@ -471,6 +531,7 @@ pub async fn init_schema_with_retry(conn: &Connection, default_fts_enabled: bool
         match init_res {
             Ok(_) => match async {
                 ensure_identity_schema(conn).await?;
+                ensure_document_metadata_schema(conn).await?;
                 ensure_audit_logs_schema(conn).await?;
                 ensure_system_meta(conn, default_fts_enabled).await
             }
@@ -510,6 +571,46 @@ mod tests {
     use super::*;
     use libsql::Builder;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn document_metadata_schema_migrates_existing_tables() {
+        let path = std::env::temp_dir().join(format!(
+            "kongodb_document_metadata_schema_{}.db",
+            Uuid::new_v4().simple()
+        ));
+        let db = Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE __kdb_documents (id TEXT PRIMARY KEY, collection TEXT NOT NULL, data ANY NOT NULL) STRICT;
+             CREATE TABLE __kdb_archive (id TEXT) STRICT;",
+        )
+        .await
+        .unwrap();
+
+        ensure_document_metadata_schema(&conn).await.unwrap();
+        ensure_document_metadata_schema(&conn).await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM pragma_table_info('__kdb_documents') WHERE name = '_metadata'
+                 UNION ALL
+                 SELECT COUNT(*) FROM pragma_table_info('__kdb_archive') WHERE name = '_metadata'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+        drop(rows);
+        drop(conn);
+        drop(db);
+        let _ = tokio::fs::remove_file(path).await;
+    }
 
     #[tokio::test]
     async fn identity_schema_adds_password_change_flag_to_existing_table() {

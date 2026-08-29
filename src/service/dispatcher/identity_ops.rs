@@ -285,10 +285,15 @@ async fn user_update(
         .map(|v| normalize_rfc3339_utc(&v))
         .transpose()?;
     let requires_password_change = payload.requires_password_change;
-    let data = payload.data.unwrap_or_else(|| current.get("data").cloned().unwrap_or_else(|| json!({})));
-    if !data.is_object() {
-        return Err(AppError::BadRequest("data must be an object when provided".to_string()));
-    }
+    let data = match payload.data {
+        Some(data) => apply_json_object_update(
+            current.get("data").cloned().unwrap_or_else(|| json!({})),
+            data,
+            "data",
+            state.strict_mutation_operators,
+        )?,
+        None => current.get("data").cloned().unwrap_or_else(|| json!({})),
+    };
     let json_expr = json_input_expr(state.jsonb_enabled);
     conn.execute(
         &format!(

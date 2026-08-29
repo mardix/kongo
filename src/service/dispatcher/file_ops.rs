@@ -161,10 +161,16 @@ async fn file_update(
 ) -> AppResult<GatewayResponse> {
     let payload = req.payload;
     let file_id = required_text(payload.id, "id")?;
-    let metadata = payload.metadata.unwrap_or(Value::Null);
-    if !metadata.is_null() && !metadata.is_object() {
-        return Err(AppError::BadRequest("metadata must be an object when provided".to_string()));
-    }
+    let current = fetch_file(conn, &file_id).await?;
+    let metadata = match payload.metadata {
+        Some(metadata) => apply_json_object_update(
+            current.get("metadata").cloned().unwrap_or_else(|| json!({})),
+            metadata,
+            "metadata",
+            state.strict_mutation_operators,
+        )?,
+        None => Value::Null,
+    };
     let uploaded_at = match clean_optional(payload.uploaded_at) {
         Some(raw) => Some(normalize_rfc3339_utc(&raw)?),
         None => None,

@@ -1234,7 +1234,9 @@ Recognized inside `data`, `insert_data`, and `update_data` as single-key `$`-ope
 `$ts_now`, `$ts_now_ms`, `$id_uuidv4`, `$id_uuidv7`, `$id_random`, `$hash_value`
 
 **Mutation Operators** — modify existing values in place:
-`$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`, `$rename`
+`$replace`, `$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`, `$rename`
+
+`user_update.data` and `file_update.metadata` use the same patch behavior. Use `$replace` at the root or any nested path when the complete object must be replaced.
 
 ```json
 {
@@ -1299,6 +1301,7 @@ The most commonly used fields across operations:
 | `unique_fields` / `on_conflict` | string[] / string | Insert-time soft uniqueness |
 | `commit` | bool | Per-request write ack override |
 | `include_namespace` | bool | Show `_namespace` in response (alias `include_name`) |
+| `include_metadata` | bool | Include hidden document `_metadata` in `query` or `search` responses; omitted by default |
 
 *(See the full field table in the appendix docs for identity, files, metrics, and audit-specific fields.)*
 
