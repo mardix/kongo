@@ -112,7 +112,7 @@ function MetricsChart({ model }) {
         </div>
         <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">Chart</span>
       </div>
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-3">
+      <div className="overflow-x-auto rounded-md border border-slate-200 bg-white p-3">
         <svg viewBox={`0 0 ${width} ${height}`} className="min-w-[760px]">
           <rect x="0" y="0" width={width} height={height} rx="14" fill="#f8fafc" />
           {yTicks.map((tick) => (

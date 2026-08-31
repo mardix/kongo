@@ -311,6 +311,7 @@ async fn insert(
         Some(collection.as_str()),
         &kept_ids,
         state.response_include_system_timestamps,
+        false,
     )
     .await?;
 
@@ -402,6 +403,7 @@ async fn update_inner(
     let dry_run = payload.dry_run.unwrap_or(false);
     let replace = payload.replace.unwrap_or(false);
     let array_filters = payload.array_filters.clone();
+    let metadata = normalize_document_metadata(payload.metadata.clone())?;
     reject_update_system_timestamps(payload.data.as_ref(), "data")?;
     if payload.ids.is_some() {
         return Err(AppError::BadRequest(
@@ -432,16 +434,21 @@ async fn update_inner(
                 }
                 let replacement = replacement_doc_from_payload(&mut data, &id)?;
                 let replacement_str = replacement.to_string();
-                let mut binds = vec![
-                    libsql::Value::Text(replacement_str.clone()),
-                    libsql::Value::Text(replacement_str),
-                ];
+                let mut binds = vec![libsql::Value::Text(replacement_str.clone())];
+                let metadata_clause = if let Some(metadata) = metadata.as_ref() {
+                    binds.push(libsql::Value::Text(metadata.clone()));
+                    "_metadata = ?,"
+                } else {
+                    ""
+                };
+                binds.push(libsql::Value::Text(replacement_str));
                 let where_clause = where_id_with_scope(&mut binds, collection.as_deref(), &id);
                 let mut rows = conn
                     .query(
                         &format!(
                             "UPDATE __kdb_documents
                              SET data = ?,
+                                 {metadata_clause}
                                  _size_bytes = length(?),
                                  _modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                              WHERE {where_clause}
@@ -464,6 +471,15 @@ async fn update_inner(
                         AppError::Internal(format!("update replace json decode failed: {e}"))
                     })?);
                 }
+                if let Some(metadata) = metadata.as_ref() {
+                    if let Ok(metadata) = serde_json::from_str::<Value>(metadata) {
+                        for item in &mut items {
+                            if let Some(object) = item.as_object_mut() {
+                                object.insert("_metadata".to_string(), metadata.clone());
+                            }
+                        }
+                    }
+                }
                 return Ok(GatewayResponse::ok(Some(json!({
                     "items": items,
                     "count": items.len(),
@@ -474,9 +490,9 @@ async fn update_inner(
 
             let (id, mut data) = extract_single_write_doc(payload.data, "data")?;
             data.as_object_mut().expect("object checked").remove("_id");
-            if data.as_object().expect("object checked").is_empty() {
+            if data.as_object().expect("object checked").is_empty() && metadata.is_none() {
                 return Err(AppError::BadRequest(
-                    "data must include fields to update".to_string(),
+                    "data must include fields to update or metadata must be provided".to_string(),
                 ));
             }
             if dry_run {
@@ -490,7 +506,9 @@ async fn update_inner(
                 }))));
             }
             let strict = state.strict_mutation_operators;
-            let items = if array_filters.is_some()
+            let mut items = if data.as_object().expect("object checked").is_empty() {
+                Vec::new()
+            } else if array_filters.is_some()
                 || update_requires_mutation_engine(data.as_object().expect("object checked"))
             {
                 let mut patch_obj = data.as_object().cloned().ok_or_else(|| {
@@ -547,6 +565,26 @@ async fn update_inner(
                 }
                 out
             };
+            if let Some(metadata) = metadata.as_ref() {
+                if let Some(updated) = update_document_metadata(
+                    conn,
+                    collection.as_deref(),
+                    &id,
+                    metadata,
+                )
+                .await?
+                {
+                    if items.is_empty() {
+                        items.push(updated);
+                    } else if let Some(updated_metadata) = updated.get("_metadata") {
+                        for item in &mut items {
+                            if let Some(object) = item.as_object_mut() {
+                                object.insert("_metadata".to_string(), updated_metadata.clone());
+                            }
+                        }
+                    }
+                }
+            }
             Ok(GatewayResponse::ok(Some(json!({
                 "items": items,
                 "count": items.len(),
@@ -555,6 +593,12 @@ async fn update_inner(
             }))))
         }
         (Some(_), Some(Value::Object(_))) => {
+            if metadata.is_some() {
+                return Err(AppError::BadRequest(
+                    "metadata is only supported for update with one data object containing _id"
+                        .to_string(),
+                ));
+            }
             if replace {
                 return Err(AppError::BadRequest(
                     "replace=true is only allowed for single-document update by _id".to_string(),
@@ -574,6 +618,12 @@ async fn update_inner(
             .await
         }
         (None, Some(Value::Array(_))) => {
+            if metadata.is_some() {
+                return Err(AppError::BadRequest(
+                    "metadata is only supported for update with one data object containing _id"
+                        .to_string(),
+                ));
+            }
             if replace {
                 return Err(AppError::BadRequest(
                     "replace=true is only allowed for single-document update by _id".to_string(),
@@ -595,6 +645,52 @@ async fn update_inner(
         )),
         _ => Err(AppError::BadRequest("invalid update payload".to_string())),
     }
+}
+
+async fn update_document_metadata(
+    conn: &libsql::Connection,
+    collection: Option<&str>,
+    id: &str,
+    metadata: &str,
+) -> AppResult<Option<Value>> {
+    let mut binds = vec![libsql::Value::Text(metadata.to_string())];
+    let where_clause = where_id_with_scope(&mut binds, collection, id);
+    let mut rows = conn
+        .query(
+            &format!(
+                "UPDATE __kdb_documents
+                 SET _metadata = ?,
+                     _modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE {where_clause}
+                 RETURNING json(data), _metadata"
+            ),
+            binds,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("update metadata failed: {e}")))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| AppError::Internal(format!("update metadata row read failed: {e}")))?
+    else {
+        return Ok(None);
+    };
+    let raw: String = row
+        .get(0)
+        .map_err(|e| AppError::Internal(format!("update metadata data decode failed: {e}")))?;
+    let mut item = serde_json::from_str::<Value>(&raw)
+        .map_err(|e| AppError::Internal(format!("update metadata json decode failed: {e}")))?;
+    let metadata_value: Option<String> = row
+        .get(1)
+        .map_err(|e| AppError::Internal(format!("update metadata value decode failed: {e}")))?;
+    if let Some(metadata) = metadata_value {
+        if let Ok(metadata) = serde_json::from_str::<Value>(&metadata) {
+            if let Some(object) = item.as_object_mut() {
+                object.insert("_metadata".to_string(), metadata);
+            }
+        }
+    }
+    Ok(Some(item))
 }
 
 // Additional write handlers extracted from dispatcher.rs.
@@ -846,6 +942,7 @@ async fn upsert_inner(
         Some(insert_collection.as_str()),
         std::slice::from_ref(&new_id_owned),
         state.response_include_system_timestamps,
+        false,
     )
     .await?;
 

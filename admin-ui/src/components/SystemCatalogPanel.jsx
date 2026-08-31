@@ -124,7 +124,7 @@ export function SystemCatalogPanel() {
           <div className="flex flex-wrap items-center gap-2">
             <CatalogBadge enabled={catalogEnabled} />
             <button type="button" onClick={() => loadInventory()} className="btn-secondary">Load Inventory</button>
-            <button type="button" onClick={refreshInventory} className="btn-primary">Refresh Catalog</button>
+            <button type="button" onClick={refreshInventory} className="btn-primary">Reset & Refresh Inventory</button>
             <button type="button" onClick={() => snapshotStats('')} className="btn-secondary">Snapshot Active DBs</button>
           </div>
         </div>
@@ -275,7 +275,7 @@ function DbStatusCard({ row, status, onLoad, onSnapshot, onStats, onEvents }) {
 
 function MetricCard({ label, value }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
       <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
       <div className="mt-1 break-words font-mono text-lg font-semibold text-slate-950">{value ?? 'n/a'}</div>
     </div>

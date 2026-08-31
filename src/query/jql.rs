@@ -107,6 +107,10 @@ fn compile_field_expr_on_base(
     path: &str,
     value: &Value,
 ) -> AppResult<CompiledWhere> {
+    if path.matches("[]").count() > 1 {
+        return compile_nested_array_field_expr(base_expr, path, value);
+    }
+
     if let Some((array_path, remainder)) = split_first_array_path(path)? {
         let element_filter = if remainder.is_empty() {
             if value
@@ -164,6 +168,79 @@ fn compile_field_expr_on_base(
         sql: parts.join(" AND "),
         binds,
     })
+}
+
+fn compile_nested_array_field_expr(
+    base_expr: &str,
+    path: &str,
+    value: &Value,
+) -> AppResult<CompiledWhere> {
+    let pattern = array_path_fullkey_pattern(path)?;
+    let alias = json_tree_alias(base_expr, path);
+    let scalar_expr = format!("{alias}.atom");
+    let array_expr = format!("{alias}.value");
+    let Some(op_obj) = value.as_object() else {
+        return Ok(CompiledWhere {
+            sql: format!(
+                "EXISTS (SELECT 1 FROM json_tree({base_expr}) {alias} WHERE {alias}.fullkey LIKE ? AND {scalar_expr} = ?)"
+            ),
+            binds: vec![libsql::Value::Text(pattern), json_to_sql_value(value)?],
+        });
+    };
+
+    let mut parts = vec![format!("{alias}.fullkey LIKE ?")];
+    let mut binds = vec![libsql::Value::Text(pattern)];
+    for (op, operand) in op_obj {
+        compile_operator(
+            op,
+            operand,
+            &scalar_expr,
+            &array_expr,
+            &mut parts,
+            &mut binds,
+            Some(base_expr),
+        )?;
+    }
+    if parts.len() == 1 {
+        return Err(AppError::BadRequest(
+            "empty field operator object".to_string(),
+        ));
+    }
+
+    Ok(CompiledWhere {
+        sql: format!(
+            "EXISTS (SELECT 1 FROM json_tree({base_expr}) {alias} WHERE {})",
+            parts.join(" AND ")
+        ),
+        binds,
+    })
+}
+
+fn array_path_fullkey_pattern(path: &str) -> AppResult<String> {
+    let mut pattern = String::from("$");
+    for segment in path.split('.') {
+        if let Some(field) = segment.strip_suffix("[]") {
+            if field.is_empty() || field.contains(['[', ']']) {
+                return Err(AppError::BadRequest(format!(
+                    "invalid array filter path segment: {segment}"
+                )));
+            }
+            pattern.push('.');
+            pattern.push_str(field);
+            pattern.push_str("[%]");
+        } else {
+            if segment.is_empty()
+                || !segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return Err(AppError::BadRequest("invalid filter path".to_string()));
+            }
+            pattern.push('.');
+            pattern.push_str(segment);
+        }
+    }
+    Ok(pattern)
 }
 
 fn split_first_array_path(path: &str) -> AppResult<Option<(String, String)>> {
@@ -409,6 +486,15 @@ fn json_each_alias(array_expr: &str) -> String {
     format!("je_{hash:x}")
 }
 
+fn json_tree_alias(base_expr: &str, path: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in format!("{base_expr}:{path}").as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("jt_{hash:x}")
+}
+
 fn compile_size_predicate(
     size_expr: &str,
     operand: &Value,
@@ -570,8 +656,14 @@ mod tests {
             "departments[].teams[].members[].name": "Ada"
         }))
         .expect("nested array paths should compile");
-        assert_eq!(compiled.sql.matches("EXISTS").count(), 3);
-        assert_eq!(compiled.binds.len(), 1);
+        assert!(compiled.sql.contains("json_tree"));
+        assert!(!compiled.sql.contains("json_each"));
+        assert!(matches!(
+            compiled.binds.first(),
+            Some(libsql::Value::Text(pattern))
+                if pattern == "$.departments[%].teams[%].members[%].name"
+        ));
+        assert_eq!(compiled.binds.len(), 2);
     }
 
     #[test]

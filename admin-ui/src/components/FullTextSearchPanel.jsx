@@ -154,7 +154,7 @@ export function FullTextSearchPanel({ db, namespaces, gateway, runStatusCall, sh
 
           <ResponsePanel title="Search Results" data={response} durationMs={durationMs} />
           {response ? (
-            <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
               <span>Page <strong className="text-slate-950">{currentPage}</strong>{totalPages ? <> of <strong className="text-slate-950">{totalPages}</strong></> : null} · {Number(response?.data?.total_items || 0).toLocaleString()} matches</span>
               <div className="flex gap-2">
                 <button type="button" onClick={() => runSearch(Math.max(1, currentPage - 1))} disabled={!pagination.prev_page} className="btn-secondary">Previous</button>
@@ -186,7 +186,7 @@ export function FullTextSearchPanel({ db, namespaces, gateway, runStatusCall, sh
 
 function IndexAction({ title, description, onClick, primary = false, danger = false }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
       <h4 className="text-sm font-semibold text-slate-950">{title}</h4>
       <p className="mt-1 min-h-10 text-xs leading-5 text-slate-500">{description}</p>
       <button type="button" onClick={onClick} className={danger ? 'btn-danger mt-3 w-full' : primary ? 'btn-primary mt-3 w-full' : 'btn-secondary mt-3 w-full'}>{title}</button>

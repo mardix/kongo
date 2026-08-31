@@ -55,7 +55,7 @@ export function rowColumns(rows) {
   const flattened = rows.map((row) => flattenRow(row));
   return {
     rows: flattened,
-    keys: [...new Set(flattened.flatMap((row) => Object.keys(row)))].slice(0, 28)
+    keys: [...new Set(flattened.flatMap((row) => Object.keys(row)))]
   };
 }
 

@@ -325,7 +325,7 @@ function MetricsQueryMode({
               <TimeWindowControls form={form} onChange={onChange} />
 
               <div className="lg:col-span-2">
-                <div className="mb-3 flex gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 ">
+                <div className="mb-3 flex gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 ">
                   <div className="min-w-0">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Range</div>
                     <div className="flex flex-wrap items-center gap-2">

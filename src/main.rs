@@ -594,6 +594,148 @@ async fn main() {
     axum::serve(listener, app).await.expect("server crashed");
 }
 
+#[cfg(test)]
+mod metadata_update_repro_test {
+    use super::*;
+    use crate::api::dto::{GatewayRequest, NamespaceSelector, OperationPayload};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn metadata_only_update_through_committed_coordinator() {
+        let root = std::env::temp_dir().join(format!(
+            "kongo_metadata_update_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let data_dir = root.to_string_lossy().to_string();
+        let manager = MultiDbManager::new(
+            crate::config::StorageConfig {
+                mode: StorageMode::Local,
+                data_dir: data_dir.clone(),
+                s3: None,
+            },
+            true,
+            10,
+        );
+        let db_path = "tenant/app.main";
+        let conn = manager.get_conn_with_create(db_path, true).await.unwrap();
+        conn.execute(
+            "INSERT INTO __kdb_documents (id, collection, data) VALUES (?, ?, json(?))",
+            libsql::params![
+                "48808c9d496a45f18fe60b9604726a89",
+                "users",
+                "{\"name\":\"Mike Jones\"}"
+            ],
+        )
+        .await
+        .unwrap();
+        let state = AppState::new(
+            manager,
+            data_dir.clone(),
+            false,
+            String::new(),
+            false,
+            String::new(),
+            vec![],
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            data_dir.clone(),
+            None,
+            data_dir.clone(),
+            false,
+            60,
+            100,
+            true,
+            false,
+            true,
+            50,
+            20,
+            3,
+            false,
+            4,
+            50,
+            30_000,
+            30,
+            30,
+            500,
+            false,
+            60,
+            500,
+            None,
+            50,
+            1000,
+            false,
+            true,
+            "committed".to_string(),
+            1024,
+            30,
+            0,
+            1,
+            1,
+            14,
+            Some(SystemCatalog::new(data_dir)),
+        );
+        let insert_request = GatewayRequest {
+            db: Some(db_path.to_string()),
+            operation: "insert".to_string(),
+            namespace: Some(NamespaceSelector::One("users".to_string())),
+            payload: OperationPayload {
+                collection: Some("users".to_string()),
+                data: Some(json!({"_id": "http-repro-1", "name": "Inserted"})),
+                commit: Some(true),
+                ..Default::default()
+            },
+        };
+        let insert_response = crate::service::dispatcher::dispatch(&state, db_path, insert_request)
+            .await
+            .unwrap();
+        assert_eq!(insert_response.status, "success");
+
+        let request = GatewayRequest {
+            db: Some(db_path.to_string()),
+            operation: "update".to_string(),
+            namespace: Some(NamespaceSelector::One("users".to_string())),
+            payload: OperationPayload {
+                collection: Some("users".to_string()),
+                data: Some(json!({"_id": "48808c9d496a45f18fe60b9604726a89"})),
+                metadata: Some(json!({"hello": "world"})),
+                commit: Some(true),
+                ..Default::default()
+            },
+        };
+        let response = crate::service::dispatcher::dispatch(&state, db_path, request)
+            .await
+            .unwrap();
+        assert_eq!(response.status, "success");
+
+        let reserved_timestamp_request = GatewayRequest {
+            db: Some(db_path.to_string()),
+            operation: "update".to_string(),
+            namespace: Some(NamespaceSelector::One("users".to_string())),
+            payload: OperationPayload {
+                collection: Some("users".to_string()),
+                data: Some(json!({
+                    "_created_at": "2026-07-17T01:38:57.632Z",
+                    "_id": "48808c9d496a45f18fe60b9604726a89",
+                    "_modified_at": "2026-07-17T01:38:57.632Z",
+                    "name": "Mike Jones"
+                })),
+                max_docs: Some(1),
+                commit: Some(true),
+                ..Default::default()
+            },
+        };
+        let error =
+            crate::service::dispatcher::dispatch(&state, db_path, reserved_timestamp_request)
+                .await
+                .expect_err("reserved update timestamps must be rejected");
+        assert!(error.to_string().contains("cannot contain _created_at"));
+    }
+}
+
 fn next_worker_sleep(base_secs: u64, error_streak: u32) -> Duration {
     let base = base_secs.max(1);
     let backoff = 1u64 << error_streak.min(3);

@@ -31,7 +31,7 @@ export function GlobalAdminPanel({ setPage }) {
         actions={<><button onClick={ping} className="btn-secondary">Ping</button><button onClick={openDocs} className="btn-secondary">Open Docs</button><button onClick={() => setPage?.('metrics')} className="btn-primary">Open Metrics</button></>}
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-neutral/20 bg-white p-1">
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-neutral/20 bg-white p-1">
         <button type="button" onClick={() => setView('tools')} className={`btn-tab ${view === 'tools' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Admin Tools</button>
         <button type="button" onClick={() => setView('catalog')} className={`btn-tab ${view === 'catalog' ? 'btn-tab-active' : 'btn-tab-idle'}`}>System Catalog</button>
       </div>

@@ -2990,6 +2990,7 @@ async fn fetch_kdb_documents_by_ids(
     collection: Option<&str>,
     ids: &[String],
     include_system_timestamps: bool,
+    include_metadata: bool,
 ) -> AppResult<Vec<Value>> {
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -2999,10 +3000,11 @@ async fn fetch_kdb_documents_by_ids(
     let mut binds: Vec<libsql::Value> = Vec::new();
     let where_clause = where_ids_with_scope(&mut binds, collection, ids, &placeholders);
 
-    let sql = if include_system_timestamps {
-        format!("SELECT json(data), _user_id, _created_at, _modified_at FROM __kdb_documents WHERE {where_clause}")
-    } else {
-        format!("SELECT json(data), _user_id FROM __kdb_documents WHERE {where_clause}")
+    let sql = match (include_system_timestamps, include_metadata) {
+        (true, true) => format!("SELECT json(data), _user_id, _created_at, _modified_at, json(_metadata) FROM __kdb_documents WHERE {where_clause}"),
+        (true, false) => format!("SELECT json(data), _user_id, _created_at, _modified_at FROM __kdb_documents WHERE {where_clause}"),
+        (false, true) => format!("SELECT json(data), _user_id, json(_metadata) FROM __kdb_documents WHERE {where_clause}"),
+        (false, false) => format!("SELECT json(data), _user_id FROM __kdb_documents WHERE {where_clause}"),
     };
 
     let mut rows = conn
@@ -3033,6 +3035,19 @@ async fn fetch_kdb_documents_by_ids(
                 AppError::Internal(format!("fetch documents modified_at decode failed: {e}"))
             })?;
             attach_system_timestamps(&mut item, created_at, modified_at);
+        }
+        if include_metadata {
+            let metadata_index = if include_system_timestamps { 4 } else { 2 };
+            let metadata: Option<String> = row.get(metadata_index).map_err(|e| {
+                AppError::Internal(format!("fetch documents metadata decode failed: {e}"))
+            })?;
+            if let Some(metadata) = metadata {
+                if let Ok(metadata) = serde_json::from_str::<Value>(&metadata) {
+                    if let Some(object) = item.as_object_mut() {
+                        object.insert("_metadata".to_string(), metadata);
+                    }
+                }
+            }
         }
         if let Some(id) = item.get("_id").and_then(Value::as_str) {
             by_id.insert(id.to_string(), item);

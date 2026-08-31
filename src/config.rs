@@ -255,7 +255,7 @@ impl KongodbConfig {
         let worker_concurrency = env_usize("KONGODB_WORKER_CONCURRENCY")
             .unwrap_or(profile.worker_concurrency)
             .max(1);
-        let cache_ttl_secs = env_u64("KONGODB_CACHE_TTL_SECS").unwrap_or(15);
+        let cache_ttl_secs = env_u64("KONGODB_CACHE_TTL_SECS").unwrap_or(60);
         let metric_cache_ttl_secs = env_u64("KONGODB_METRIC_EVENTS_CACHE_TTL_SECS").unwrap_or(30);
         let s3_topology = match std::env::var("KONGODB_S3_TOPOLOGY")
             .unwrap_or_else(|_| "single".to_string())

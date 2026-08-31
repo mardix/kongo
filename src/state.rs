@@ -627,10 +627,11 @@ impl AppState {
                 match item.mode {
                     QueuedWriteMode::AcceptedPrepared => {
                         let request = item.request;
-                        let preview = crate::service::dispatcher::prepare_pending_write_preview(
-                            &state, &db_path, &request,
-                        )
-                        .await;
+                        let preview =
+                            Box::pin(crate::service::dispatcher::prepare_pending_write_preview(
+                                &state, &db_path, &request,
+                            ))
+                            .await;
                         let preview = match preview {
                             Ok(preview) => preview,
                             Err(err) => {
@@ -644,9 +645,9 @@ impl AppState {
                         if let Some(response_tx) = item.response_tx {
                             let _ = response_tx.send(Ok(preview.response));
                         }
-                        let result = crate::service::dispatcher::dispatch_write_worker(
+                        let result = Box::pin(crate::service::dispatcher::dispatch_write_worker(
                             &state, &db_path, request,
-                        )
+                        ))
                         .await;
                         if result.is_ok() {
                             state.clear_pending_if_current(&db_path, &revisions);
@@ -656,11 +657,11 @@ impl AppState {
                         }
                     }
                     QueuedWriteMode::Accepted | QueuedWriteMode::Committed => {
-                        let result = crate::service::dispatcher::dispatch_write_worker(
+                        let result = Box::pin(crate::service::dispatcher::dispatch_write_worker(
                             &state,
                             &db_path,
                             item.request,
-                        )
+                        ))
                         .await;
                         if let Some(response_tx) = item.response_tx {
                             let _ = response_tx.send(result);

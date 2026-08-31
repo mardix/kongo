@@ -369,6 +369,11 @@ async fn execute_query_inner(
             if let Some(candidate) = state.get_pending_document(db_path, id) {
                 if pending_matches_read_scope(&candidate.collection, &namespace_scope) {
                     let mut item = candidate.document;
+                    if !include_metadata {
+                        if let Some(object) = item.as_object_mut() {
+                            object.remove("_metadata");
+                        }
+                    }
                     if include_namespace {
                         if let (Some(obj), Some(ns)) =
                             (item.as_object_mut(), candidate.collection.as_ref())

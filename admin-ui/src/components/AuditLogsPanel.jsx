@@ -110,7 +110,7 @@ export function AuditLogsPanel({ db, gateway, runStatusCall, showToast }) {
           {requestOpen ? <RequestPreview request={queryRequest} onCopy={() => copyRequest(queryRequest)} /> : null}
           <ResponsePanel title="Audit Logs" data={response} durationMs={durationMs} />
           {response ? (
-            <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
               <span>Page <strong className="text-slate-950">{currentPage}</strong>{pagination.total_pages ? <> of <strong className="text-slate-950">{pagination.total_pages}</strong></> : null} · {Number(response?.data?.total_items || 0).toLocaleString()} events</span>
               <div className="flex gap-2">
                 <button type="button" onClick={() => runQuery(Math.max(1, currentPage - 1))} disabled={!pagination.prev_page} className="btn-secondary">Previous</button>

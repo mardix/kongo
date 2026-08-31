@@ -120,6 +120,8 @@ export function DbCrudConsole() {
   const [requestHistory, setRequestHistory] = useState(() => loadRequestHistory(connectionStorageKey));
   const [historyOpen, setHistoryOpen] = useState(false);
   const [rowDrawer, setRowDrawer] = useState(null);
+  const [modalReturnRow, setModalReturnRow] = useState(null);
+  const [lifecycleModal, setLifecycleModal] = useState(null);
   const [datastoreView, setDatastoreView] = useState('home');
   const [datastoreWizardOpen, setDatastoreWizardOpen] = useState(true);
   const [datastoreQuery, setDatastoreQuery] = useState({
@@ -482,7 +484,8 @@ export function DbCrudConsole() {
         _user_id: userFormValue(userId),
         attach_users: attachUsers || undefined,
         attach_user_fields: attachUsers ? splitCsv(attachUserFields) : undefined,
-        include_system_timestamps: true
+        include_system_timestamps: true,
+        include_metadata: true
       }
     };
     setRequestText(pretty(request));
@@ -546,7 +549,8 @@ export function DbCrudConsole() {
           _user_id: userFormValue(datastoreQuery.userId),
           attach_users: datastoreQuery.attachUsers || undefined,
           attach_user_fields: datastoreQuery.attachUsers ? splitCsv(datastoreQuery.attachUserFields) : undefined,
-          include_system_timestamps: true
+          include_system_timestamps: true,
+          include_metadata: true
         }
       },
       filter,
@@ -579,6 +583,8 @@ export function DbCrudConsole() {
 
   function openBatchAction(action) {
     if (!selectedIds.length) return showToast('Select at least one document first', true);
+    setRowDrawer(null);
+    setModalReturnRow(null);
     setBatchModal({
       action,
       ids: selectedIds,
@@ -587,6 +593,27 @@ export function DbCrudConsole() {
       expiryBehavior: 'archive',
       dryRun: false
     });
+  }
+
+  function closeDocumentModal(restoreDrawer = true) {
+    setEntryModal(null);
+    const row = modalReturnRow;
+    setModalReturnRow(null);
+    if (restoreDrawer && row && documentId(row)) setRowDrawer(row);
+  }
+
+  function closeBatchModal(restoreDrawer = true) {
+    setBatchModal(null);
+    const row = modalReturnRow;
+    setModalReturnRow(null);
+    if (restoreDrawer && row && documentId(row)) setRowDrawer(row);
+  }
+
+  function closeLifecycleModal(restoreDrawer = true) {
+    setLifecycleModal(null);
+    const row = modalReturnRow;
+    setModalReturnRow(null);
+    if (restoreDrawer && row && documentId(row)) setRowDrawer(row);
   }
 
   function updateBatchModal(patch) {
@@ -625,7 +652,8 @@ export function DbCrudConsole() {
     }
     await runStatusCall(async () => {
       const { data, durationMs } = await timedGateway(request);
-      setBatchModal(null);
+      const restoreDrawer = Boolean(batchModal.dryRun) || (batchModal.action !== 'purge' && batchModal.action !== 'delete');
+      closeBatchModal(restoreDrawer);
       if (batchModal.dryRun) {
         setResponse(data);
         setResponseDurationMs(durationMs);
@@ -638,6 +666,8 @@ export function DbCrudConsole() {
   }
 
   function openCreateEntry() {
+    setRowDrawer(null);
+    setModalReturnRow(null);
     const availableNamespaces = new Set(activeNamespaces.map(namespaceLabel).filter(Boolean));
     const namespace = availableNamespaces.has(settings.namespace) ? String(settings.namespace).trim() : '';
     setEntryModal({
@@ -662,6 +692,7 @@ export function DbCrudConsole() {
   }
 
   function openEditEntry(row) {
+    setRowDrawer(null);
     const data = normalizeDocumentForEdit(row);
     const originalNamespace = namespaceFromRow(row) || settings.namespace;
     setEntryModal({
@@ -686,6 +717,8 @@ export function DbCrudConsole() {
   }
 
   function openViewEntry(row) {
+    setRowDrawer(null);
+    setModalReturnRow(null);
     setEntryModal({
       mode: 'view',
       namespace: namespaceFromRow(row) || settings.namespace,
@@ -707,6 +740,8 @@ export function DbCrudConsole() {
   }
 
   function openDeleteEntry(row = null) {
+    setRowDrawer(null);
+    if (!row) setModalReturnRow(null);
     setEntryModal({
       mode: 'delete',
       namespace: namespaceFromRow(row) || settings.namespace,
@@ -807,7 +842,7 @@ export function DbCrudConsole() {
           });
           dryRunData = { status: 'success', data: { update: data, change_namespace: move } };
         }
-        setEntryModal(null);
+        closeDocumentModal(true);
         setResponse(dryRunData);
         setResponseDurationMs(durationMs);
         setLastOperation(request.operation);
@@ -820,7 +855,7 @@ export function DbCrudConsole() {
           payload: { from_namespace: originalNamespace, to_namespace: namespace, ids: [entryModal.id], max_docs: 1 }
         });
       }
-      setEntryModal(null);
+      closeDocumentModal(entryModal.mode !== 'delete' && !movingNamespace);
       if (entryModal.mode === 'create' || movingNamespace) {
         const addNamespace = (items) => items.some((item) => namespaceLabel(item) === namespace)
           ? items
@@ -911,8 +946,62 @@ export function DbCrudConsole() {
     })));
   }
 
+  async function updateDocumentMetadata(row, metadata) {
+    if (!activeDb) return null;
+    const id = documentId(row);
+    if (!id) return showToast('Metadata updates require a document id', true);
+    const namespace = namespaceFromRow(row) || settings.namespace;
+    if (!namespace) return showToast('Metadata updates require a namespace', true);
+    const request = {
+      db: activeDb,
+      operation: 'update',
+      namespace,
+      payload: { data: { _id: id }, metadata }
+    };
+    const data = await runStatusCall(async () => {
+      const { data: responseData, durationMs } = await timedGateway(request);
+      setResponse(responseData);
+      setResponseDurationMs(durationMs);
+      setLastOperation('update');
+      rememberRequest(request);
+      return responseData;
+    });
+    if (data) {
+      setRowDrawer((current) => current && documentId(current) === id
+        ? { ...current, _metadata: metadata }
+        : current);
+      showToast('Document metadata updated');
+      await loadNamespacePage(namespace, documentPage, documentPageSize, { collapseRequest: true });
+    }
+    return data;
+  }
+
   function openRowDrawer(row) {
+    setModalReturnRow(null);
     setRowDrawer(row);
+  }
+
+  function openDocumentLifecycle(row) {
+    if (!row || !documentId(row)) return showToast('Document lifecycle requires an id', true);
+    setModalReturnRow(row);
+    setRowDrawer(null);
+    setLifecycleModal(row);
+  }
+
+  function openDocumentTtl(row) {
+    const id = documentId(row);
+    if (!row || !id) return showToast('Document TTL requires an id', true);
+    setModalReturnRow(row);
+    setRowDrawer(null);
+    setLifecycleModal(null);
+    setBatchModal({
+      action: 'set_ttl',
+      ids: [id],
+      namespace: namespaceFromRow(row) || settings.namespace,
+      ttlSeconds: '3600',
+      expiryBehavior: String(row?._expiry_behavior || row?.data?._expiry_behavior || 'archive'),
+      dryRun: false
+    });
   }
 
   function navigateToDb(db) {
@@ -973,7 +1062,20 @@ export function DbCrudConsole() {
       ) : null}
 
       {route.tab === 'crud' ? (
-        <DatastoreSubnav view={datastoreView} onView={changeDatastoreView} namespaceCount={activeNamespaces.length} onRefreshNamespaces={() => listNamespaces()} />
+        <DatastoreSubnav
+          view={datastoreView}
+          onView={changeDatastoreView}
+          namespaces={activeNamespaces}
+          selected={settings.namespace}
+          onSelect={openNamespace}
+          namespaceCount={activeNamespaces.length}
+          onRefresh={async () => {
+            await listNamespaces();
+            await refreshCurrentPage();
+          }}
+          onAdd={openCreateEntry}
+          onDelete={() => openDeleteEntry()}
+        />
       ) : null}
 
       {route.tab === 'stats' ? (
@@ -1035,23 +1137,12 @@ export function DbCrudConsole() {
 
           {datastoreView === 'home' ? (
             <>
-              <DocumentDbHomeToolbar
-                namespaces={activeNamespaces}
-                selected={settings.namespace}
-                onSelect={openNamespace}
-                onAdd={openCreateEntry}
-                onRefresh={() => refreshCurrentPage()}
-              />
-
               <div className="space-y-4">
                 <NamespaceTabs
                   tabs={namespaceTabs}
                   active={settings.namespace}
                   onSelect={(namespace) => openNamespace(namespace)}
                   onClose={closeNamespaceTab}
-                  actions={(
-                    <button onClick={() => openDeleteEntry()} disabled={!settings.namespace} className="btn-secondary">Delete By Id</button>
-                  )}
                 />
 
                 {!namespaceTabs.length ? (
@@ -1168,12 +1259,22 @@ export function DbCrudConsole() {
         </section>
       )}
 
+      {lifecycleModal ? (
+        <DocumentLifecycleModal
+          row={lifecycleModal}
+          namespaceFallback={settings.namespace}
+          onClose={() => closeLifecycleModal()}
+          onSetTtl={() => openDocumentTtl(lifecycleModal)}
+          onLifecycleOperation={runDocumentLifecycleOperation}
+        />
+      ) : null}
+
       {entryModal ? (
         <EntryModal
           modal={entryModal}
           namespaces={activeNamespaces}
           onChange={updateEntryModal}
-          onClose={() => setEntryModal(null)}
+          onClose={() => closeDocumentModal()}
           onSubmit={submitEntryModal}
         />
       ) : null}
@@ -1182,7 +1283,7 @@ export function DbCrudConsole() {
         <BatchActionModal
           modal={batchModal}
           onChange={updateBatchModal}
-          onClose={() => setBatchModal(null)}
+          onClose={() => closeBatchModal()}
           onSubmit={submitBatchAction}
         />
       ) : null}
@@ -1190,14 +1291,20 @@ export function DbCrudConsole() {
       {rowDrawer ? (
         <RowDrawer
           row={rowDrawer}
-          onClose={() => setRowDrawer(null)}
+          namespaceFallback={settings.namespace}
+          onClose={() => {
+            setRowDrawer(null);
+            setModalReturnRow(null);
+          }}
           onEdit={() => {
             const row = rowDrawer;
+            setModalReturnRow(row);
             setRowDrawer(null);
             openEditEntry(row);
           }}
           onDelete={() => {
             const row = rowDrawer;
+            setModalReturnRow(row);
             setRowDrawer(null);
             openDeleteEntry(row);
           }}
@@ -1206,23 +1313,14 @@ export function DbCrudConsole() {
             showToast('Document id copied');
           }}
           onCopyJson={async () => {
-            await navigator.clipboard.writeText(pretty(normalizeDocumentForDisplay(rowDrawer)));
+            await navigator.clipboard.writeText(pretty(normalizeDocumentContentForDisplay(rowDrawer)));
             showToast('Document JSON copied');
           }}
           onSetTtl={() => {
-            const row = rowDrawer;
-            const id = documentId(row);
-            setRowDrawer(null);
-            setBatchModal({
-              action: 'set_ttl',
-              ids: [id],
-              namespace: namespaceFromRow(row) || settings.namespace,
-              ttlSeconds: '3600',
-              expiryBehavior: String(row?._expiry_behavior || row?.data?._expiry_behavior || 'archive'),
-              dryRun: false
-            });
+            openDocumentTtl(rowDrawer);
           }}
-          onLifecycleOperation={runDocumentLifecycleOperation}
+          onLifecycle={() => openDocumentLifecycle(rowDrawer)}
+          onUpdateMetadata={(metadata) => updateDocumentMetadata(rowDrawer, metadata)}
         />
       ) : null}
     </section>
@@ -1231,11 +1329,11 @@ export function DbCrudConsole() {
 
 function DatabaseContextBar({ connectionName, origin, db }) {
   return (
-    <div className="-mt-4 flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 rounded-b-lg border-x border-b border-slate-200 bg-white/80 px-3 py-1.5 text-xs text-slate-500 lg:-mt-6">
+    <div className="-mt-4 flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 rounded-b-md border-x border-b border-slate-200 bg-white/80 px-3 py-1.5 text-xs text-slate-500 lg:-mt-6">
       <button
         type="button"
         onClick={() => { window.location.hash = `#crud/db/${encodeDbForHash(db)}/overview`; }}
-        className="inline-flex items-center gap-1.5 font-semibold text-slate-600 transition hover:text-primary"
+        className="inline-flex items-center gap-1.5 font-semibold text-sky-800 transition hover:text-primary"
         aria-label="Open database overview"
       >
         <span className="hidden" aria-hidden="true">←</span>
@@ -1243,14 +1341,14 @@ function DatabaseContextBar({ connectionName, origin, db }) {
       </button>
       <span className="h-4 w-px bg-slate-200" aria-hidden="true" />
       <span className="inline-flex min-w-0 items-center gap-1.5">
-        <span className="text-slate-400">Connection</span>
-        <strong className="max-w-36 truncate font-semibold text-slate-700" title={connectionName || 'Connection'}>{connectionName || 'Connection'}</strong>
-        <span className="max-w-52 truncate font-mono text-[10px] text-slate-600" title={origin}>/ {connectionHost(origin)}</span>
+        <span className="text-slate-400">Connection:</span>
+        <strong className="truncate font-semibold text-slate-700" title={connectionName || 'Connection'}>{connectionName || 'Connection'}</strong>
+        <span className="truncate font-mono text-xs text-slate-600" title={origin}>@ {connectionHost(origin)}</span>
       </span>
       <span className="hidden h-4 w-px bg-slate-200 sm:block" aria-hidden="true" />
       <span className="inline-flex min-w-0 items-center gap-1.5">
-        <span className="text-slate-400">Database</span>
-        <code className="max-w-[min(52vw,32rem)] truncate font-mono text-[11px] font-semibold text-slate-700" title={db}>{db}</code>
+        <span className="text-slate-400">Database:</span>
+        <code className="max-w-[min(52vw,32rem)] truncate font-mono text-xs font-semibold text-slate-700" title={db}>{db}</code>
       </span>
     </div>
   );
@@ -1309,7 +1407,7 @@ function DbHome({ connectionName, folderPath = '', dbs, newDb, setNewDb, dbSearc
 
   return (
     <section>
-      <section className="overflow-hidden rounded-xl border border-slate-300 bg-white">
+      <section className="overflow-hidden rounded-md border border-slate-300 bg-white">
         <div className="flex flex-col gap-5 border-b border-slate-300 px-5 py-5 lg:flex-row lg:items-start lg:justify-between lg:px-6">
           <div>
             <h2 className="text-xl font-bold tracking-tight text-slate-950">Database Inventory</h2>
@@ -1417,7 +1515,7 @@ function DbHome({ connectionName, folderPath = '', dbs, newDb, setNewDb, dbSearc
 function CreateDbModal({ value, onChange, onClose, onSubmit }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
-      <div className="w-full max-w-xl rounded-2xl border border-slate-300 bg-white">
+      <div className="w-full max-w-xl rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="border-b border-slate-200 px-5 py-4">
           <h3 className="text-lg font-semibold text-slate-950">Create new Db</h3>
           <p className="mt-1 text-sm text-slate-600">Enter the database path, then create and open it in the DB view.</p>
@@ -1445,11 +1543,11 @@ function DbListSection({ title, description, tone, dbs, onOpen }) {
         <span className={`rounded-full px-3 py-1 text-xs font-semibold ${tone === 'loaded' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{dbs.length}</span>
       </div>
       {dbs.length ? (
-        <div className="overflow-hidden rounded-xl border border-slate-200">
+        <div className="overflow-hidden rounded-md border border-slate-200">
           {dbs.map((db, idx) => <DbRow key={`${dbLabel(db)}-${idx}`} db={db} onOpen={() => onOpen(dbLabel(db))} />)}
         </div>
       ) : (
-        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-slate-500">No databases in this group.</div>
+        <div className="rounded-md border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-slate-500">No databases in this group.</div>
       )}
     </section>
   );
@@ -1623,19 +1721,19 @@ function DbOverviewPanel({ db, dbInfo, namespaces, stats, dataCount, onOpen, onR
 
   return (
     <section className="space-y-4">
-      <section className="overflow-hidden rounded-2xl border border-slate-300 bg-slate-50">
+      <section className="overflow-hidden rounded-md border border-slate-300 bg-slate-50">
         <div className="flex flex-col gap-6 bg-white px-6 py-7 md:flex-row md:items-start md:justify-between lg:px-8 lg:py-8">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-3">
-              <div className="text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Database Overview</div>
+              <div className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Database Overview</div>
               <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${truthy(dbInfo?.loaded) ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
                 {truthy(dbInfo?.loaded) ? 'Loaded' : 'Not Loaded'}
               </span>
             </div>
-            <h2 className="mt-4 break-all font-mono text-xl font-bold leading-tight tracking-tight text-slate-950 lg:text-2xl">{db}</h2>
-            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-600">
-              <span className="rounded-md border border-slate-300 bg-slate-50 px-2.5 py-1.5">Storage</span>
-              <span className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-slate-800">{storage}</span>
+            <h2 className="mt-4 break-all font-mono text-xl font-bold leading-tight tracking-tight text-slate-950 lg:text-[26px]">{db}</h2>
+            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
+              <span className="rounded-md border border-slate-300 bg-slate-50 px-2.5 py-1.5 text-slate-500">Storage</span>
+              <span className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-slate-700">{storage}</span>
               <span className="ml-1 text-slate-400">Live database workspace</span>
             </div>
           </div>
@@ -1646,10 +1744,10 @@ function DbOverviewPanel({ db, dbInfo, namespaces, stats, dataCount, onOpen, onR
           <div className="px-6 py-7 lg:border-r lg:px-8">
             <div className="flex items-end justify-between gap-3">
               <div>
-                <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Inventory</h3>
-                <p className="mt-1 text-sm text-slate-600">Data currently managed by this database.</p>
+                <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Inventory</h3>
+                <p className="mt-1 text-sm font-light text-slate-500">Data currently managed by this database.</p>
               </div>
-              <span className="font-mono text-xs font-semibold text-slate-500">{formatBytes(dbInfo?.local_size_bytes ?? dbInfo?.size_bytes ?? liveBytes)}</span>
+              <span className="font-mono text-xs font-semibold text-slate-400">{formatBytes(dbInfo?.local_size_bytes ?? dbInfo?.size_bytes ?? liveBytes)}</span>
             </div>
             <div className="mt-6 grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-3 xl:grid-cols-5">
               <OverviewMetric label="Total Data" value={formatNumber(totalDataCount)} />
@@ -1661,10 +1759,10 @@ function DbOverviewPanel({ db, dbInfo, namespaces, stats, dataCount, onOpen, onR
           </div>
           <div className="border-t border-slate-300 bg-white px-6 py-7 lg:border-t-0 lg:px-8">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">Traffic</h3>
-              <span className="rounded-md border border-slate-300 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-600">Current runtime</span>
+              <h3 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Traffic</h3>
+              <span className="rounded-md border border-slate-300 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-500">Current runtime</span>
             </div>
-            <p className="mt-1 text-sm text-slate-600">Requests handled by this instance.</p>
+            <p className="mt-1 text-sm font-light text-slate-500">Requests handled by this instance.</p>
             <div className="mt-6 grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-4">
               <OverviewMetric label="Requests" value={formatNumber(requestCount)} />
               <OverviewMetric label="Reads" value={formatNumber(stats?.reads_total)} />
@@ -1678,25 +1776,25 @@ function DbOverviewPanel({ db, dbInfo, namespaces, stats, dataCount, onOpen, onR
       <section>
         <div className="mb-4">
           <h3 className="text-lg font-bold tracking-tight text-slate-950">Workspaces</h3>
-          <p className="mt-1 text-sm font-medium text-slate-600">Every workspace stays scoped to <span className="font-mono font-semibold text-slate-800">{db}</span>.</p>
+          <p className="mt-1 text-sm font-light text-slate-500">Every workspace stays scoped to <span className="font-mono font-semibold text-slate-100 bg-slate-500 p-1">{db}</span>.</p>
         </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {tools.map((tool) => (
-            <button key={tool.id} type="button" onClick={() => onOpen(tool.id)} className="group min-h-40 rounded-xl border border-slate-300 bg-white p-5 text-left transition-colors hover:border-slate-500 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/30">
+            <button key={tool.id} type="button" onClick={() => onOpen(tool.id)} className="group min-h-40 rounded-md border border-slate-300 bg-white p-5 text-left transition-colors hover:border-slate-500 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400/30">
               <div className="flex items-start justify-between gap-3">
-                <h4 className="text-base font-bold tracking-tight text-slate-950 group-hover:text-primary">{tool.title}</h4>
-                {tool.value !== undefined ? <span className="font-mono text-xl font-bold leading-none text-slate-950">{tool.value}</span> : null}
+                <h4 className="text-md font-medium !tracking-wide text-slate-900 group-hover:text-primary">{tool.title}</h4>
+                {tool.value !== undefined ? <span className="font-mono text-xl font-bold leading-none tracking-tight text-slate-600 bg-slate-300 p-2 rounded-md">{tool.value}</span> : null}
               </div>
-              <p className="mt-2 text-sm font-medium leading-6 text-slate-600">{tool.description}</p>
-              {tool.detail ? <div className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">{tool.detail}</div> : null}
+              <p className="mt-2 !font-thin text-slate-500">{tool.description}</p>
+              {tool.detail ? <div className="mt-4 text-xs font-mono font-light uppercase tracking-wide text-sky-800">{tool.detail}</div> : null}
             </button>
           ))}
-          <div className="min-h-40 rounded-xl border border-dashed border-slate-400 bg-transparent p-5">
-            <h4 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-600">More Tools</h4>
+          <div className="min-h-40 rounded-md border border-dashed border-slate-400 bg-transparent p-5">
+            <h4 className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">More Tools</h4>
             <div className="mt-3 space-y-1">
-              <button type="button" onClick={() => onOpen('query')} className="block text-base font-semibold text-slate-800 hover:text-slate-950 hover:underline">Query</button>
-              <button type="button" onClick={() => onOpen('stats')} className="block text-base font-semibold text-slate-800 hover:text-slate-950 hover:underline">Stats</button>
-              <button type="button" onClick={() => onOpen('admin')} className="block text-base font-semibold text-slate-800 hover:text-slate-950 hover:underline">Database Admin</button>
+              <button type="button" onClick={() => onOpen('query')} className="block text-base font-semibold text-slate-700 hover:text-slate-950 hover:underline">Query</button>
+              <button type="button" onClick={() => onOpen('stats')} className="block text-base font-semibold text-slate-700 hover:text-slate-950 hover:underline">Stats</button>
+              <button type="button" onClick={() => onOpen('admin')} className="block text-base font-semibold text-slate-700 hover:text-slate-950 hover:underline">Database Admin</button>
             </div>
           </div>
         </div>
@@ -1706,8 +1804,8 @@ function DbOverviewPanel({ db, dbInfo, namespaces, stats, dataCount, onOpen, onR
 }
 
 function OverviewMetric({ label, value, muted = false, danger = false }) {
-  const valueTone = danger ? 'text-rose-700' : muted ? 'text-slate-400' : 'text-slate-950';
-  const labelTone = danger ? 'text-rose-700' : 'text-slate-600';
+  const valueTone = danger ? 'text-rose-700' : muted ? 'text-slate-400' : 'text-sky-800';
+  const labelTone = danger ? 'text-rose-700' : 'text-slate-500';
   return (
     <div className="min-w-0">
       <div className={`break-words font-mono text-xl font-bold leading-none tracking-tight ${valueTone}`}>{value ?? 'n/a'}</div>
@@ -1716,60 +1814,65 @@ function OverviewMetric({ label, value, muted = false, danger = false }) {
   );
 }
 
-function DatastoreSubnav({ view, onView, namespaceCount, onRefreshNamespaces }) {
-  return (
-    <section className="panel px-3 py-2">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="text-sm font-semibold text-slate-950">DocumentDB</div>
-          <div className="flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1">
-            <button onClick={() => onView('home')} className={`btn-tab ${view === 'home' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Home</button>
-            <button onClick={() => onView('query')} className={`btn-tab ${view === 'query' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Query</button>
-            <button onClick={() => onView('namespaces')} className={`btn-tab ${view === 'namespaces' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Namespaces {namespaceCount ? `(${namespaceCount})` : ''}</button>
-          </div>
-        </div>
-        <button onClick={onRefreshNamespaces} className="btn-secondary">Refresh Namespaces</button>
-      </div>
-    </section>
-  );
-}
-
-function DocumentDbHomeToolbar({ namespaces, selected, onSelect, onAdd, onRefresh }) {
-  const options = namespaces.map((item) => ({ name: namespaceLabel(item), item })).filter((item) => item.name);
-  const current = options.find((item) => item.name === selected)?.item;
+function DatastoreSubnav({ view, onView, namespaces, selected, onSelect, namespaceCount, onRefresh, onAdd, onDelete }) {
+  const options = namespaces.map((item) => namespaceLabel(item)).filter(Boolean);
+  const current = namespaces.find((item) => namespaceLabel(item) === selected);
   const count = current?.live_count ?? current?.count ?? current?.document_count;
   const size = current?.size_bytes ?? current?.total_size_bytes;
 
   return (
-    <section className="panel px-4 py-3">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center">
-        <label className="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-row sm:items-center">
-          <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-slate-500">Namespaces:</span>
-          <span className="min-w-0 flex-1 sm:max-w-xl">
-            <select value={selected || ''} onChange={(event) => onSelect(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
-              {!options.length ? <option value="">No namespaces available</option> : null}
-              {options.length && !selected ? <option value="">Select a namespace</option> : null}
-              {options.map(({ name }) => <option key={name} value={name}>{name}</option>)}
-            </select>
-          </span>
-          {selected && (count !== undefined || size !== undefined) ? (
-            <span className="flex shrink-0 items-center gap-2 text-[11px] text-slate-500">
-              {count !== undefined ? <span>{Number(count).toLocaleString()} documents</span> : null}
-              {size !== undefined ? <span>{formatBytes(Number(size))}</span> : null}
-            </span>
-          ) : null}
+    <section className="panel px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2.5">
+        <div className="shrink-0 text-md font-semibold text-slate-950">DocumentDB</div>
+        <div className="flex shrink-0 flex-wrap gap-1 rounded-lg bg-slate-100 p-1">
+          <button onClick={() => onView('home')} className={`btn-tab ${view === 'home' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Data</button>
+          <button onClick={() => onView('query')} className={`btn-tab ${view === 'query' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Query</button>
+          <button onClick={() => onView('namespaces')} className={`btn-tab ${view === 'namespaces' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Namespaces {namespaceCount ? `(${namespaceCount})` : ''}</button>
+        </div>
+        {view === 'home' ? (
+        <label className="flex min-w-[220px] flex-1 items-center gap-2">
+          <span className="shrink-0 text-xs uppercase tracking-wide text-slate-500"> | Select</span>
+          <select value={selected || ''} onChange={(event) => onSelect(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-800 outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
+            {!options.length ? <option value="">No namespaces available</option> : null}
+            {options.length && !selected ? <option value="">Select a namespace</option> : null}
+            {options.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
         </label>
-        <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">
-          <button type="button" onClick={onRefresh} disabled={!selected} className="btn-secondary">Refresh</button>
-          <button type="button" onClick={onAdd} className="btn-primary">Add Entry</button>
+        ): null }
+
+        {selected && (count !== undefined || size !== undefined) ? (
+          <span className="hidden flex shrink-0 items-center gap-2 text-[11px] text-slate-500">
+            {count !== undefined ? <span>{Number(count).toLocaleString()} documents</span> : null}
+            {size !== undefined ? <span>{formatBytes(Number(size))}</span> : null}
+          </span>
+        ) : null}
+        <div className="ml-auto flex shrink-0 flex-wrap gap-2">
+          <button type="button" onClick={onRefresh} className="btn-secondary">Refresh{view === 'home' ? '' : ' namespaces'}</button>
+          {view === 'home' ? <button type="button" onClick={onAdd} className="btn-primary">Add New Entry</button> : null}
+          {view === 'home' ? (
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={!selected}
+              className="inline-flex h-8 w-8 items-center justify-center rounded text-danger transition hover:bg-rose-50"
+              aria-label="Delete Entry"
+              title="Delete Entry"
+            >
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" />
+              </svg>
+            </button>
+          ) : null}
         </div>
       </div>
     </section>
   );
 }
 
-function NamespaceTabs({ tabs, active, onSelect, onClose, actions }) {
-  if (!tabs.length && !actions) return null;
+function NamespaceTabs({ tabs, active, onSelect, onClose }) {
+  return null 
+
+  if (!tabs.length) return null;
   return (
     <section className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex min-w-0 items-center flex-wrap gap-2">
@@ -1781,7 +1884,6 @@ function NamespaceTabs({ tabs, active, onSelect, onClose, actions }) {
           </div>
         ))}
       </div>
-      {actions ? <div className="flex flex-wrap items-center justify-end gap-2">{actions}</div> : null}
     </section>
   );
 }
@@ -2208,7 +2310,7 @@ function FileCatalogForm({ form, onChange, mode }) {
 function FileCatalogDetail({ file, onClose, onEdit, onSoftDelete, onPurge }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-label="File Details">
-      <section className="w-full max-w-3xl overflow-hidden rounded-2xl border border-slate-300 bg-white">
+      <section className="w-full max-w-3xl overflow-hidden rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -2217,7 +2319,7 @@ function FileCatalogDetail({ file, onClose, onEdit, onSoftDelete, onPurge }) {
             </div>
             <p className="mt-1 truncate font-mono text-xs text-slate-500" title={file.storage_path}>{file.storage_path}</p>
           </div>
-          <button type="button" onClick={onClose} className="btn-secondary" aria-label="Close File Details">Close</button>
+          <button type="button" onClick={onClose} className="modal-close" aria-label="Close File Details" title="Close"><span aria-hidden="true">&times;</span></button>
         </div>
         <div className="max-h-[70vh] overflow-y-auto p-5">
           <div className="grid gap-2 md:grid-cols-2">
@@ -2232,7 +2334,7 @@ function FileCatalogDetail({ file, onClose, onEdit, onSoftDelete, onPurge }) {
             <IdentitySummaryRow label="Expires" value={file.expires_at} />
             <IdentitySummaryRow label="SHA256" value={file.sha256} />
           </div>
-          <details className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <details className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
             <summary className="cursor-pointer text-xs font-semibold text-slate-700">Metadata JSON</summary>
             <pre className="mt-3 max-h-56 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs text-slate-100">{pretty(file.metadata || {})}</pre>
           </details>
@@ -2447,7 +2549,7 @@ function DatastoreQueryWizard({ namespace, namespaces, form, open, onToggle, onN
             <Field label="Attach User Fields" value={form.attachUserFields || ''} onChange={(value) => onChange({ attachUserFields: value })} placeholder="id, first_name, last_name, profile_photo" />
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50/70">
+          <div className="rounded-md border border-slate-200 bg-slate-50/70">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-3 py-2">
               <div>
                 <div className="field-label">Filter</div>
@@ -2633,9 +2735,9 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
   const flattenedRows = tablePreferences.topLevelOnly
     ? normalizedRows
     : normalizedRows.map((row) => flattenDocumentForTable(row));
-  const keys = [...new Set(flattenedRows.flatMap((row) => Object.keys(row)))].slice(0, 60);
+  const keys = [...new Set(flattenedRows.flatMap((row) => Object.keys(row)))];
   const orderedKeys = orderDocumentColumns(keys, tablePreferences.columnOrder);
-  const shownKeys = orderedKeys.filter((key) => key === '_id' || !tablePreferences.hiddenColumns.includes(key));
+  const shownKeys = orderedKeys.filter((key) => key.startsWith('_') || !tablePreferences.hiddenColumns.includes(key));
   const hiddenCount = orderedKeys.length - shownKeys.length;
   const scrollKeys = shownKeys.filter((key) => key !== '_id');
   const [sortKey, sortDir = ''] = String(sort || '').trim().split(/\s+/);
@@ -2669,7 +2771,7 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
   }
 
   function toggleColumn(key) {
-    if (key === '_id') return;
+    if (key.startsWith('_')) return;
     updateTablePreferences({
       hiddenColumns: tablePreferences.hiddenColumns.includes(key)
         ? tablePreferences.hiddenColumns.filter((item) => item !== key)
@@ -2759,7 +2861,7 @@ function DocumentsPanel({ rows, response, durationMs, sort, namespace, requestTe
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {orderedKeys.map((key, index) => (
               <div key={key} className={`flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2 ${tablePreferences.hiddenColumns.includes(key) ? 'border-slate-200 bg-white text-slate-500' : 'border-slate-300 bg-white text-slate-900'}`}>
-                <input type="checkbox" checked={!tablePreferences.hiddenColumns.includes(key)} disabled={key === '_id'} onChange={() => toggleColumn(key)} aria-label={`Show ${key}`} />
+                <input type="checkbox" checked={!tablePreferences.hiddenColumns.includes(key)} disabled={key.startsWith('_')} onChange={() => toggleColumn(key)} aria-label={`Show ${key}`} />
                 <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold" title={key}>{key}</span>
                 <button type="button" onClick={() => moveColumn(key, -1)} disabled={index === 0} className="btn-label" aria-label={`Move ${key} left`}>←</button>
                 <button type="button" onClick={() => moveColumn(key, 1)} disabled={index === orderedKeys.length - 1} className="btn-label" aria-label={`Move ${key} right`}>→</button>
@@ -2923,7 +3025,7 @@ function DocumentValueModal({ value, onClose }) {
   }
   return createPortal(
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-label="Full document value">
-      <div className="flex max-h-[88vh] w-full max-w-5xl flex-col rounded-xl border border-slate-300 bg-white">
+      <div className="flex max-h-[88vh] w-full max-w-5xl flex-col rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div>
             <h3 className="text-base font-bold text-slate-950">Full Value</h3>
@@ -2932,7 +3034,7 @@ function DocumentValueModal({ value, onClose }) {
           <div className="flex items-center gap-2">
             {copied ? <span className="text-xs font-semibold text-emerald-700">Copied</span> : null}
             <button type="button" onClick={copy} className="btn-secondary">Copy Value</button>
-            <button type="button" onClick={onClose} className="btn-secondary">Close</button>
+            <button type="button" onClick={onClose} className="modal-close" aria-label="Close Full Document Value" title="Close"><span aria-hidden="true">&times;</span></button>
           </div>
         </div>
         <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-sm text-slate-800">{content}</pre>
@@ -2987,13 +3089,13 @@ function EntryModal({ modal, namespaces = [], onChange, onClose, onSubmit }) {
   ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
-      <div className="max-h-[94vh] w-full max-w-6xl overflow-auto rounded-2xl border border-slate-300 bg-white">
+      <div className="max-h-[94vh] w-full max-w-6xl overflow-auto rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="sticky top-0 z-30 flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 bg-white px-5 py-4">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">{title}</h3>
             <p className="mt-1 text-sm text-slate-600">Configure record metadata, then build the document visually or edit its JSON directly.</p>
           </div>
-          <button onClick={onClose} className="btn-secondary">Close</button>
+          <button type="button" onClick={onClose} className="modal-close" aria-label={`Close ${title}`} title="Close"><span aria-hidden="true">&times;</span></button>
         </div>
 
         <section className="border-b border-slate-200 bg-slate-50 px-5 py-4">
@@ -3110,8 +3212,121 @@ function EntryModal({ modal, namespaces = [], onChange, onClose, onSubmit }) {
   );
 }
 
-function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson, onSetTtl, onLifecycleOperation }) {
+function RowDrawer({ row, namespaceFallback, onClose, onEdit, onDelete, onCopyId, onCopyJson, onSetTtl, onLifecycle, onUpdateMetadata }) {
   const [viewMode, setViewMode] = useState('tree');
+  const [detailTab, setDetailTab] = useState('document');
+  const [metadataMode, setMetadataMode] = useState('view');
+  const [metadataText, setMetadataText] = useState(() => pretty(row?._metadata || {}));
+  const [metadataError, setMetadataError] = useState('');
+  const [metadataSaving, setMetadataSaving] = useState(false);
+  const id = documentId(row);
+  const namespace = namespaceFromRow(row) || (isConcreteNamespace(namespaceFallback) ? String(namespaceFallback).trim() : '');
+  const userId = documentUserId(row);
+  const document = normalizeDocumentForDisplay(row);
+  const documentText = pretty(normalizeDocumentContentForDisplay(row));
+  const metadataAvailable = Object.prototype.hasOwnProperty.call(row || {}, '_metadata');
+  const metadataKey = metadataAvailable ? JSON.stringify(row._metadata) : '';
+  const expiresAt = String(row?._expires_at || row?.data?._expires_at || document?._expires_at || '');
+  const expiryBehavior = String(row?._expiry_behavior || row?.data?._expiry_behavior || document?._expiry_behavior || 'archive');
+
+  useEffect(() => {
+    setViewMode('tree');
+    setDetailTab('document');
+    setMetadataMode('view');
+    setMetadataText(pretty(row?._metadata || {}));
+    setMetadataError('');
+  }, [id, metadataKey]);
+
+  async function saveMetadata() {
+    const [metadata, error] = tryParseJson(metadataText || '{}');
+    if (error) return setMetadataError(`Invalid metadata JSON: ${error.message}`);
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return setMetadataError('Metadata must be a JSON object.');
+    }
+    setMetadataError('');
+    setMetadataSaving(true);
+    const result = await onUpdateMetadata(metadata);
+    setMetadataSaving(false);
+    if (result) {
+      setMetadataText(pretty(metadata));
+      setMetadataMode('view');
+    }
+  }
+
+  return (
+    <>
+      <button type="button" onClick={onClose} className="fixed inset-0 z-40 cursor-default bg-slate-950/20" aria-label="Close document details" />
+      <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-5xl flex-col border-l border-slate-300 bg-white shadow-2xl">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+        <div className="min-w-0">
+          <h3 className="text-lg font-semibold text-slate-950">Document Details</h3>
+          <p className="mt-1 truncate font-mono text-xs text-slate-500">{namespace ? `${namespace} · ` : ''}{id || 'no _id'}</p>
+        </div>
+        <button type="button" onClick={onClose} className="modal-close" aria-label="Close Document Details" title="Close"><span aria-hidden="true">&times;</span></button>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onEdit} className="btn-primary">Edit Document</button>
+          <button onClick={onSetTtl} disabled={!id} className="btn-secondary">Document TTL</button>
+          <button onClick={onLifecycle} disabled={!id} className="btn-secondary">Document Lifecycle</button>
+          <button onClick={onCopyId} disabled={!id} className="btn-secondary disabled:cursor-not-allowed disabled:opacity-50">Copy _id</button>
+          <button onClick={onCopyJson} className="btn-secondary">Copy JSON</button>
+          <button onClick={onDelete} className="btn-danger">Delete</button>
+        </div>
+        <div className="flex gap-1 rounded-lg bg-slate-100 p-1" aria-label="Document detail tabs">
+          <button type="button" onClick={() => setDetailTab('document')} className={`btn-tab ${detailTab === 'document' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Document</button>
+          <button type="button" onClick={() => setDetailTab('metadata')} className={`btn-tab ${detailTab === 'metadata' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Metadata{metadataAvailable ? '' : ' · Empty'}</button>
+        </div>
+        </div>
+        <div className="grid gap-2 border-b border-slate-200 bg-slate-50 px-5 py-3 text-xs md:grid-cols-5">
+        <ContextPill label="_id" value={id || 'n/a'} mono />
+        <ContextPill label="_user_id" value={userId || 'none'} mono tone={userId ? 'selected' : 'default'} />
+        <ContextPill label="Namespace" value={namespace || 'n/a'} mono />
+        <ContextPill label="Expires" value={expiresAt || 'No TTL'} mono tone={expiresAt ? 'selected' : 'default'} />
+        <ContextPill label="On Expiry" value={expiryBehavior} />
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-5">
+        {detailTab === 'document' ? (
+          <div className="space-y-3">
+            <div className="flex justify-end gap-1 rounded-lg bg-slate-100 p-1" aria-label="Document detail view">
+              <button type="button" onClick={() => setViewMode('tree')} className={`btn-tab ${viewMode === 'tree' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Tree View</button>
+              <button type="button" onClick={() => setViewMode('json')} className={`btn-tab ${viewMode === 'json' ? 'btn-tab-active' : 'btn-tab-idle'}`}>JSON View</button>
+            </div>
+            {viewMode === 'tree' ? (
+              <DocumentUiEditor key={`detail:${id || 'document'}`} value={documentText} readOnly />
+            ) : (
+              <JsonEditor value={documentText} onChange={() => {}} minHeight="520px" readOnly />
+            )}
+          </div>
+        ) : (
+          <section className="space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-950">Document Metadata</h4>
+                <p className="mt-1 text-xs text-slate-600">Metadata is stored separately from the document data and is available when the request includes <code>include_metadata: true</code>.</p>
+              </div>
+              <div className="flex gap-2">
+                {metadataMode === 'view' ? (
+                  <button type="button" onClick={() => { setMetadataMode('edit'); setMetadataError(''); }} className="btn-secondary">Edit Metadata</button>
+                ) : (
+                  <>
+                    <button type="button" onClick={() => { setMetadataMode('view'); setMetadataText(pretty(row?._metadata || {})); setMetadataError(''); }} className="btn-secondary">Cancel</button>
+                    <button type="button" onClick={saveMetadata} disabled={metadataSaving} className="btn-primary disabled:cursor-not-allowed disabled:opacity-50">{metadataSaving ? 'Saving...' : 'Save Metadata'}</button>
+                  </>
+                )}
+              </div>
+            </div>
+            {metadataError ? <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{metadataError}</div> : null}
+            <JsonEditor value={metadataText} onChange={setMetadataText} minHeight="420px" readOnly={metadataMode === 'view'} />
+          </section>
+        )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function DocumentLifecycleModal({ row, namespaceFallback, onClose, onSetTtl, onLifecycleOperation }) {
   const [transitions, setTransitions] = useState([]);
   const [lifecycleLoading, setLifecycleLoading] = useState(false);
   const [lifecycleError, setLifecycleError] = useState('');
@@ -3126,16 +3341,14 @@ function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson, onSet
     expiryBehavior: 'archive'
   });
   const id = documentId(row);
-  const namespace = namespaceFromRow(row);
-  const userId = documentUserId(row);
-  const document = normalizeDocumentForDisplay(row);
-  const documentText = pretty(document);
-  const expiresAt = String(row?._expires_at || row?.data?._expires_at || document?._expires_at || '');
-  const expiryBehavior = String(row?._expiry_behavior || row?.data?._expiry_behavior || document?._expiry_behavior || 'archive');
+  const namespace = namespaceFromRow(row) || (isConcreteNamespace(namespaceFallback) ? String(namespaceFallback).trim() : '');
+  const documentData = normalizeDocumentForDisplay(row);
+  const expiresAt = String(row?._expires_at || row?.data?._expires_at || documentData?._expires_at || '');
+  const expiryBehavior = String(row?._expiry_behavior || row?.data?._expiry_behavior || documentData?._expiry_behavior || 'archive');
 
   useEffect(() => {
-    if (viewMode === 'lifecycle') void loadTransitions();
-  }, [viewMode, id]);
+    void loadTransitions();
+  }, [id]);
 
   async function loadTransitions() {
     if (!id) return;
@@ -3178,42 +3391,18 @@ function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson, onSet
     const data = await onLifecycleOperation(operation, { transition_id: transitionId }, namespace);
     if (data) await loadTransitions();
   }
-  return (
-    <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-5xl flex-col border-l border-slate-300 bg-white">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
-        <div className="min-w-0">
-          <h3 className="text-lg font-semibold text-slate-950">Document Details</h3>
-          <p className="mt-1 truncate font-mono text-xs text-slate-500">{namespace ? `${namespace} · ` : ''}{id || 'no _id'}</p>
+
+  return createPortal(
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-label="Document lifecycle">
+      <section className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-md border border-slate-300 bg-white shadow-2xl">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+          <div className="min-w-0">
+            <h3 className="text-lg font-semibold text-slate-950">Document Lifecycle</h3>
+            <p className="mt-1 truncate font-mono text-xs text-slate-500">{namespace ? `${namespace} · ` : ''}{id}</p>
+          </div>
+          <button type="button" onClick={onClose} className="modal-close" aria-label="Close Document Lifecycle" title="Close"><span aria-hidden="true">&times;</span></button>
         </div>
-        <button onClick={onClose} className="btn-secondary">Close</button>
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
-        <div className="flex flex-wrap gap-2">
-          <button onClick={onEdit} className="btn-primary">Edit</button>
-          <button onClick={onDelete} className="btn-danger">Delete</button>
-          <button onClick={onSetTtl} disabled={!id} className="btn-secondary">Manage TTL</button>
-          <button onClick={onCopyId} disabled={!id} className="btn-secondary disabled:cursor-not-allowed disabled:opacity-50">Copy _id</button>
-          <button onClick={onCopyJson} className="btn-secondary">Copy JSON</button>
-        </div>
-        <div className="flex gap-1 rounded-lg bg-slate-100 p-1" aria-label="Document detail view">
-          <button type="button" onClick={() => setViewMode('tree')} className={`btn-tab ${viewMode === 'tree' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Tree View</button>
-          <button type="button" onClick={() => setViewMode('json')} className={`btn-tab ${viewMode === 'json' ? 'btn-tab-active' : 'btn-tab-idle'}`}>JSON View</button>
-          <button type="button" onClick={() => setViewMode('lifecycle')} className={`btn-tab ${viewMode === 'lifecycle' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Lifecycle</button>
-        </div>
-      </div>
-      <div className="grid gap-2 border-b border-slate-200 bg-slate-50 px-5 py-3 text-xs md:grid-cols-5">
-        <ContextPill label="_id" value={id || 'n/a'} mono />
-        <ContextPill label="_user_id" value={userId || 'none'} mono tone={userId ? 'selected' : 'default'} />
-        <ContextPill label="Namespace" value={namespace || 'n/a'} mono />
-        <ContextPill label="Expires" value={expiresAt || 'No TTL'} mono tone={expiresAt ? 'selected' : 'default'} />
-        <ContextPill label="On Expiry" value={expiryBehavior} />
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-5">
-        {viewMode === 'tree' ? (
-          <DocumentUiEditor key={`detail:${id || 'document'}`} value={documentText} readOnly />
-        ) : viewMode === 'json' ? (
-          <JsonEditor value={documentText} onChange={() => {}} minHeight="520px" readOnly />
-        ) : (
+        <div className="min-h-0 overflow-auto bg-slate-50 p-5">
           <DocumentLifecyclePanel
             expiresAt={expiresAt}
             expiryBehavior={expiryBehavior}
@@ -3228,9 +3417,10 @@ function RowDrawer({ row, onClose, onEdit, onDelete, onCopyId, onCopyJson, onSet
             onCancel={(transition) => changeTransition('cancel_transition', transition)}
             onRetry={(transition) => changeTransition('retry_transition', transition)}
           />
-        )}
-      </div>
-    </div>
+        </div>
+      </section>
+    </div>,
+    document.body
   );
 }
 
@@ -3243,7 +3433,7 @@ function DocumentLifecyclePanel({ expiresAt, expiryBehavior, transitions, loadin
             <h3 className="text-sm font-bold text-slate-950">TTL Lifecycle</h3>
             <p className="text-xs text-slate-600">TTL archives or permanently deletes the document when its expiration time is reached.</p>
           </div>
-          <button type="button" onClick={onSetTtl} className="btn-primary">Set Or Clear TTL</button>
+          <button type="button" onClick={onSetTtl} className="btn-secondary">Set Or Clear TTL</button>
         </div>
         <div className="grid gap-3 p-4 sm:grid-cols-2">
           <MiniMeta label="Expires At" value={expiresAt || 'No TTL configured'} />
@@ -3336,13 +3526,13 @@ function BatchActionModal({ modal, onChange, onClose, onSubmit }) {
   const danger = modal.action === 'purge' || modal.action === 'delete';
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 p-4">
-      <div className="w-full max-w-xl rounded-2xl border border-slate-300 bg-white">
+      <div className="w-full max-w-xl rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">{title}</h3>
             <p className="mt-1 text-sm text-slate-600">{modal.ids.length} selected document{modal.ids.length === 1 ? '' : 's'} in this namespace.</p>
           </div>
-          <button onClick={onClose} className="btn-secondary">Close</button>
+          <button type="button" onClick={onClose} className="modal-close" aria-label={`Close ${title}`} title="Close"><span aria-hidden="true">&times;</span></button>
         </div>
 
         <div className="space-y-4 px-5 py-5">
@@ -3518,7 +3708,7 @@ function DbStatsPanel({ db, dbInfo, namespaces, stats, dataCount, rollups, onRef
 
 function DataCountList({ title, items, primaryKey, valueKey, secondaryKey = null, secondaryLabel = '' }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-slate-200">
+    <div className="overflow-hidden rounded-md border border-slate-200">
       <div className="flex items-center justify-between bg-slate-50 px-3 py-2">
         <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-600">{title}</h4>
         <span className="font-mono text-xs text-slate-500">{items.length}</span>
@@ -4258,19 +4448,19 @@ function IdentityBulkModal({ modal, selectedCount, onChange, onClose, onSubmit }
   const isStatus = modal.action === 'status';
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-slate-300 bg-white">
+      <div className="w-full max-w-lg rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">{isStatus ? 'Update Selected Status' : 'Delete Selected Users'}</h3>
             <p className="text-sm text-slate-500">{selectedCount} selected user{selectedCount === 1 ? '' : 's'}</p>
           </div>
-          <button onClick={onClose} className="btn-secondary">Close</button>
+          <button type="button" onClick={onClose} className="modal-close" aria-label="Close Identity Action" title="Close"><span aria-hidden="true">&times;</span></button>
         </div>
         <div className="space-y-3 p-5">
           {isStatus ? <IdentityStatusSelect value={modal.status} onChange={(status) => onChange({ status })} label="New Status" /> : null}
           <Field label="Reason" value={modal.status_reason} onChange={(value) => onChange({ status_reason: value })} placeholder="optional" />
           {!isStatus ? (
-            <label className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
+            <label className="flex items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
               <input type="checkbox" checked={modal.purge} onChange={(event) => onChange({ purge: event.target.checked })} />
               Purge: hard-delete identity records
             </label>
@@ -4291,7 +4481,7 @@ function IdentityUserDetailPanel({ details, tab, onTab, onClose, onEdit, provide
   const events = details.events || [];
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
-      <section className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-300 bg-white">
+      <section className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="border-b border-slate-200 px-5 py-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -4302,7 +4492,7 @@ function IdentityUserDetailPanel({ details, tab, onTab, onClose, onEdit, provide
               <p className="mt-1 truncate text-sm text-slate-500">{user.email || user.username || 'No email or username'}</p>
               <p className="mt-1 truncate font-mono text-[11px] text-slate-400" title={user.id}>{user.id}</p>
             </div>
-            <button type="button" onClick={onClose} className="btn-secondary">Close</button>
+            <button type="button" onClick={onClose} className="modal-close" aria-label="Close Identity Details" title="Close"><span aria-hidden="true">&times;</span></button>
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
             {['overview', 'providers', 'lifecycle'].map((item) => (
@@ -4328,8 +4518,8 @@ function IdentityUserDetailPanel({ details, tab, onTab, onClose, onEdit, provide
                 <IdentitySummaryRow label="Updated" value={user.updated_at} />
               </div>
               <div><div className="field-label">Login Methods</div><LoginMethods methods={user.login_methods || []} /></div>
-              {user.profile_photo ? <div><div className="field-label">Profile Photo</div><div className="mt-1 break-all rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">{user.profile_photo}</div></div> : null}
-              <div><div className="field-label">Application Data</div><pre className="mt-1 max-h-64 overflow-auto rounded-xl bg-slate-950 p-3 text-xs text-slate-100">{pretty(user.data || {})}</pre></div>
+              {user.profile_photo ? <div><div className="field-label">Profile Photo</div><div className="mt-1 break-all rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">{user.profile_photo}</div></div> : null}
+              <div><div className="field-label">Application Data</div><pre className="mt-1 max-h-64 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">{pretty(user.data || {})}</pre></div>
             </div>
           ) : null}
 
@@ -4339,7 +4529,7 @@ function IdentityUserDetailPanel({ details, tab, onTab, onClose, onEdit, provide
                 <div className="mb-3"><h4 className="text-sm font-semibold text-slate-950">Linked Providers</h4><p className="mt-1 text-xs text-slate-500">External identities attached to this user.</p></div>
                 <div className="space-y-2">
                   {providers.length ? providers.map((provider) => (
-                    <div key={provider.id || `${provider.provider}:${provider.provider_user_id}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div key={provider.id || `${provider.provider}:${provider.provider_user_id}`} className="rounded-md border border-slate-200 bg-slate-50 p-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="font-semibold text-slate-950">{formatIdentityLabel(provider.provider)}</div>
@@ -4352,7 +4542,7 @@ function IdentityUserDetailPanel({ details, tab, onTab, onClose, onEdit, provide
                   )) : <EmptyCards message="No linked providers." />}
                 </div>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="rounded-md border border-slate-200 bg-white p-4">
                 <h4 className="text-sm font-semibold text-slate-950">Link Provider</h4>
                 <p className="mt-1 text-xs text-slate-500">Attach an OAuth or external identity directly to this user.</p>
                 <div className="mt-4 space-y-3">
@@ -4381,7 +4571,7 @@ function IdentityUserDetailPanel({ details, tab, onTab, onClose, onEdit, provide
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button type="button" onClick={onSaveStatus} className="btn-primary">Save Status</button>
-                  <button type="button" onClick={onDelete} className="btn-secondary">Soft Delete</button>
+                  <button type="button" onClick={onDelete} className="btn-danger">Soft Delete</button>
                   <button type="button" onClick={onPurge} className="btn-danger">Purge Identity</button>
                 </div>
                 <p className="text-xs text-slate-500">Soft delete preserves the identity and reserves its email/provider mappings. Purge permanently removes related identity records.</p>
@@ -4390,7 +4580,7 @@ function IdentityUserDetailPanel({ details, tab, onTab, onClose, onEdit, provide
                 <div className="mb-3"><h4 className="text-sm font-semibold text-slate-950">Lifecycle Events</h4><p className="mt-1 text-xs text-slate-500">Recent status and identity events.</p></div>
                 <div className="max-h-[420px] space-y-2 overflow-auto">
                   {events.length ? events.map((event) => (
-                    <div key={event.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                    <div key={event.id} className="rounded-md border border-slate-200 bg-white p-3">
                       <div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-semibold text-slate-950">{event.event}</span><span className="text-[11px] text-slate-500">{event.created_at}</span></div>
                       <pre className="mt-2 overflow-auto rounded-lg bg-slate-950 p-2 text-[11px] text-slate-100">{pretty(event.data || {})}</pre>
                     </div>
@@ -4498,7 +4688,7 @@ function IdentityUserForm({ mode, form, onChange }) {
         <Field label="Last Name" value={form.last_name} onChange={(last_name) => onChange({ last_name })} placeholder="Lovelace" />
         <Field label="Profile Photo" value={form.profile_photo} onChange={(profile_photo) => onChange({ profile_photo })} placeholder="https://..., s3://..., or file id" />
       </div>
-      <label className="flex max-w-xl items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+      <label className="flex max-w-xl items-start gap-3 rounded-md border border-slate-200 bg-slate-50 px-4 py-3">
         <input
           type="checkbox"
           checked={!!form.requires_password_change}
@@ -5073,10 +5263,10 @@ function TableDangerActions({ onDeleteAll, onDrop }) {
         !
       </button>
       {open ? (
-        <div id={menuId} role="menu" className="absolute left-0 top-full z-20 mt-1 min-w-48 rounded-xl border border-rose-300 bg-white p-2">
+        <div id={menuId} role="menu" className="absolute left-0 top-full z-20 mt-1 min-w-48 rounded-md border border-rose-300 bg-white p-2">
           <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-rose-500">Danger Actions</div>
-          <button ref={firstItemRef} type="button" role="menuitem" onClick={() => run(onDeleteAll)} className="block w-full rounded-lg px-2 py-1.5 text-left text-xs font-semibold text-rose-700 hover:bg-rose-50 focus:bg-rose-50 focus:outline-none">Delete All Rows</button>
-          <button type="button" role="menuitem" onClick={() => run(onDrop)} className="mt-1 block w-full rounded-lg px-2 py-1.5 text-left text-xs font-semibold text-rose-700 hover:bg-rose-50 focus:bg-rose-50 focus:outline-none">Drop Table</button>
+          <button ref={firstItemRef} type="button" role="menuitem" onClick={() => run(onDeleteAll)} className="btn-danger block w-full text-left">Delete All Rows</button>
+          <button type="button" role="menuitem" onClick={() => run(onDrop)} className="btn-danger mt-1 block w-full text-left">Drop Table</button>
         </div>
       ) : null}
     </span>
@@ -5166,7 +5356,7 @@ function CreateSqlTableModal({ onClose, onSubmit }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
-      <div className="max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-2xl border border-slate-300 bg-white">
+      <div className="max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="panel-header-row">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">Create Table</h3>
@@ -5175,14 +5365,14 @@ function CreateSqlTableModal({ onClose, onSubmit }) {
           <div className="flex items-center gap-2">
             <button onClick={() => setMode('wizard')} className={`btn-tab ${mode === 'wizard' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Wizard</button>
             <button onClick={() => setMode('raw')} className={`btn-tab ${mode === 'raw' ? 'btn-tab-active' : 'btn-tab-idle'}`}>Raw SQL</button>
-            <button onClick={onClose} className="btn-secondary">Close</button>
+            <button type="button" onClick={onClose} className="modal-close" aria-label="Close Create Table" title="Close"><span aria-hidden="true">&times;</span></button>
           </div>
         </div>
         <div className="max-h-[calc(92vh-150px)] overflow-auto p-5">
           {mode === 'wizard' ? (
             <div className="space-y-4">
               <Field label="Table Name" value={tableName} onChange={setTableName} placeholder="customers" />
-              <div className="rounded-xl border border-slate-200">
+              <div className="rounded-md border border-slate-200">
                 <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
                   <div>
                     <h4 className="text-sm font-semibold text-slate-950">Columns</h4>
@@ -5247,17 +5437,17 @@ function SqlRowModal({ modal, onChange, onClose, onSubmit }) {
   const primaryKeys = modal.schema.filter((column) => column.isPrimaryKey);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
-      <div className="w-full max-w-3xl rounded-2xl border border-slate-300 bg-white">
+      <div className="w-full max-w-3xl rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="panel-header-row">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">Edit Row</h3>
             <p className="font-mono text-xs text-slate-500">{modal.table} · rowid {String(modal.rowid)}</p>
           </div>
-          <button onClick={onClose} className="btn-secondary">Close</button>
+          <button type="button" onClick={onClose} className="modal-close" aria-label="Close Edit Row" title="Close"><span aria-hidden="true">&times;</span></button>
         </div>
         <div className="max-h-[calc(92vh-150px)] overflow-auto p-5">
           {primaryKeys.length ? (
-            <div className="mb-4 rounded-xl border border-primary/20 bg-primary/5 p-3">
+            <div className="mb-4 rounded-md border border-primary/20 bg-primary/5 p-3">
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-primary">Primary / Protected</div>
               <div className="grid gap-2 md:grid-cols-2">
                 {primaryKeys.map((column) => (
@@ -5299,17 +5489,17 @@ function SqlInsertModal({ modal, onChange, onClose, onSubmit }) {
   const columns = modal.schema.filter((column) => !column.isPrimaryKey);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
-      <div className="max-h-[92vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-slate-300 bg-white">
+      <div className="max-h-[92vh] w-full max-w-4xl overflow-hidden rounded-md border border-slate-300 bg-white shadow-2xl">
         <div className="panel-header-row">
           <div>
             <h3 className="text-lg font-semibold text-slate-950">Insert Row</h3>
             <p className="font-mono text-xs text-slate-500">{modal.table} · {modal.schema.length} column{modal.schema.length === 1 ? '' : 's'}</p>
           </div>
-          <button onClick={onClose} className="btn-secondary">Close</button>
+          <button type="button" onClick={onClose} className="modal-close" aria-label="Close Insert Row" title="Close"><span aria-hidden="true">&times;</span></button>
         </div>
         <div className="max-h-[calc(92vh-150px)] overflow-auto p-5">
           {primaryKeys.length ? (
-            <div className="mb-4 rounded-xl border border-primary/20 bg-primary/5 p-3">
+            <div className="mb-4 rounded-md border border-primary/20 bg-primary/5 p-3">
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-primary">Generated / Protected</div>
               <div className="grid gap-2 md:grid-cols-2">
                 {primaryKeys.map((column) => (
@@ -6025,17 +6215,28 @@ function normalizeDocumentForDisplay(row) {
   if (id && !out._id) out._id = id;
   if (userId && !out._user_id) out._user_id = userId;
   if (namespace && !out._namespace) out._namespace = namespace;
+  if (Object.prototype.hasOwnProperty.call(row || {}, '_metadata')) out._metadata = row._metadata;
   return out;
 }
 
 function normalizeDocumentForEdit(row) {
-  const source = row?.data && typeof row.data === 'object' && !Array.isArray(row.data) ? row.data : row;
+  const hasDataObject = row?.data && typeof row.data === 'object' && !Array.isArray(row.data);
+  const metadata = hasDataObject
+    ? Object.fromEntries(Object.entries(row).filter(([key]) => key !== 'data' && key !== '_metadata' && key.startsWith('_')))
+    : {};
+  const source = hasDataObject ? { ...row.data, ...metadata } : row;
   const out = { ...(source || {}) };
   const id = documentId(row);
   if (id && !out._id) out._id = id;
   delete out._namespace;
   delete out.namespace;
   delete out._user_id;
+  return out;
+}
+
+function normalizeDocumentContentForDisplay(row) {
+  const out = normalizeDocumentForDisplay(row);
+  delete out._metadata;
   return out;
 }
 
@@ -6060,7 +6261,7 @@ function normalizeDocumentTablePreferences(value) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   return {
     columnOrder: Array.isArray(source.columnOrder) ? source.columnOrder.map(String) : [],
-    hiddenColumns: Array.isArray(source.hiddenColumns) ? source.hiddenColumns.map(String).filter((key) => key !== '_id') : [],
+    hiddenColumns: Array.isArray(source.hiddenColumns) ? source.hiddenColumns.map(String).filter((key) => !key.startsWith('_')) : [],
     topLevelOnly: source.topLevelOnly === true,
     defaultSort: String(source.defaultSort || '_created_at desc').trim() || '_created_at desc'
   };

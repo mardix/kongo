@@ -242,6 +242,43 @@ impl SystemCatalog {
         Ok(())
     }
 
+    pub async fn prune_db_inventory(&self, known_dbs: &[String]) -> AppResult<usize> {
+        let conn = self.connection().await?;
+        let mut rows = conn
+            .query("SELECT db FROM __kdb_system_dbs", ())
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("system catalog inventory read failed: {e}"))
+            })?;
+        let mut catalog_dbs = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| {
+            AppError::Internal(format!("system catalog inventory row read failed: {e}"))
+        })? {
+            let db: String = row.get(0).map_err(|e| {
+                AppError::Internal(format!("system catalog inventory decode failed: {e}"))
+            })?;
+            catalog_dbs.push(db);
+        }
+        drop(rows);
+
+        let known = known_dbs
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let mut removed = 0;
+        for db in catalog_dbs {
+            if !known.contains(db.as_str()) {
+                conn.execute("DELETE FROM __kdb_system_dbs WHERE db = ?", [db])
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(format!("system catalog inventory prune failed: {e}"))
+                    })?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     pub async fn insert_stats(&self, record: &SystemDbStatsRecord) -> AppResult<()> {
         let conn = self.connection().await?;
         conn.execute(

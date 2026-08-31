@@ -19,7 +19,7 @@ export function WelcomePage({ setPage }) {
 
   return (
     <section className="space-y-5">
-      <section className="overflow-hidden rounded-xl border border-slate-300 bg-white">
+      <section className="overflow-hidden rounded-md border border-slate-300 bg-white">
         <div className="grid lg:grid-cols-2">
           <div className="flex min-h-[390px] flex-col justify-center p-7 lg:p-10 xl:p-12">
             <div className="text-xs font-bold uppercase tracking-[0.2em] text-primary">Admin Console</div>

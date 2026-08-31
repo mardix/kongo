@@ -108,7 +108,7 @@ function SystemMetricsDashboard({ data, onRefresh }) {
 
 function MetricTile({ label, value }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
       <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
       <div className="mt-1 break-words font-mono text-lg font-semibold text-slate-950">{value ?? 'n/a'}</div>
     </div>
@@ -118,7 +118,7 @@ function MetricTile({ label, value }) {
 function WindowTile({ label, data }) {
   const value = data || {};
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-3">
+    <div className="rounded-md border border-slate-200 bg-white p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
         <div className="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-600">{formatNumberDecimal(value.requests_per_minute)} rpm</div>
@@ -140,6 +140,16 @@ function TrafficChart({ buckets }) {
   const maxRequests = Math.max(1, ...points.map((item) => Number(item.requests || 0)));
   const totalRequests = points.reduce((sum, item) => sum + Number(item.requests || 0), 0);
   const totalErrors = points.reduce((sum, item) => sum + Number(item.errors || 0), 0);
+  const width = 920;
+  const height = 310;
+  const plot = { left: 58, right: 18, top: 18, bottom: 52 };
+  const plotWidth = width - plot.left - plot.right;
+  const plotHeight = height - plot.top - plot.bottom;
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => ({
+    value: Math.round(maxRequests * ratio),
+    y: plot.top + plotHeight - (ratio * plotHeight)
+  }));
+  const labelStep = Math.max(1, Math.ceil(points.length / 6));
   return (
     <div className="border-b border-neutral/20 p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -152,31 +162,40 @@ function TrafficChart({ buckets }) {
           <span className="rounded-full bg-rose-50 px-2 py-1 font-semibold text-rose-700">{formatNumber(totalErrors)} errors</span>
         </div>
       </div>
-      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-        <div className="flex h-36 items-end gap-1 overflow-hidden">
+      <div className="overflow-x-auto rounded-md border border-slate-200 bg-slate-50 p-3">
+        <svg viewBox={`0 0 ${width} ${height}`} className="min-w-[760px] w-full" role="img" aria-label="Requests and errors by minute">
+          <title>Requests and errors by minute</title>
+          {yTicks.map((tick) => (
+            <g key={tick.y}>
+              <line x1={plot.left} x2={width - plot.right} y1={tick.y} y2={tick.y} stroke="#dbe3ec" />
+              <text x={plot.left - 10} y={tick.y + 4} textAnchor="end" fontSize="11" fill="#64748b">{formatNumber(tick.value)}</text>
+            </g>
+          ))}
+          <line x1={plot.left} x2={width - plot.right} y1={plot.top + plotHeight} y2={plot.top + plotHeight} stroke="#94a3b8" />
           {points.map((item, idx) => {
             const requests = Number(item.requests || 0);
             const errors = Number(item.errors || 0);
-            const height = Math.max(requests ? 6 : 2, Math.round((requests / maxRequests) * 118));
-            const errorHeight = errors ? Math.max(4, Math.round((errors / maxRequests) * 118)) : 0;
+            const slotWidth = plotWidth / points.length;
+            const barWidth = Math.max(4, slotWidth - 3);
+            const x = plot.left + (idx * slotWidth) + ((slotWidth - barWidth) / 2);
+            const requestHeight = requests ? Math.max(3, (requests / maxRequests) * plotHeight) : 2;
+            const errorHeight = errors ? Math.max(3, (errors / maxRequests) * plotHeight) : 0;
+            const requestY = plot.top + plotHeight - requestHeight;
             return (
-              <div key={`${item.ts || 'empty'}-${idx}`} className="group relative flex min-w-[5px] flex-1 items-end justify-center">
-                <div className={`w-full rounded-t-sm ${requests ? 'bg-primary/75 group-hover:bg-primary' : 'bg-slate-200'}`} style={{ height }} />
-                {errors ? <div className="absolute bottom-0 w-full rounded-t-sm bg-danger/80" style={{ height: errorHeight }} /> : null}
-                <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 hidden min-w-36 -translate-x-1/2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs group-hover:block">
-                  <div className="font-mono font-semibold text-slate-900">{formatChartTime(item.ts)}</div>
-                  <div className="mt-1 text-slate-600">Requests: <span className="font-mono font-semibold">{formatNumber(requests)}</span></div>
-                  <div className="text-slate-600">Errors: <span className="font-mono font-semibold">{formatNumber(errors)}</span></div>
-                  <div className="text-slate-600">Avg: <span className="font-mono font-semibold">{formatNumberDecimal(item.avg_latency_ms)}ms</span></div>
-                </div>
-              </div>
+              <g key={`${item.ts || 'empty'}-${idx}`}>
+                <title>{`${formatChartTime(item.ts)}: ${formatNumber(requests)} requests, ${formatNumber(errors)} errors, ${formatNumberDecimal(item.avg_latency_ms)}ms average latency`}</title>
+                <rect x={x} y={requestY} width={barWidth} height={requestHeight} rx="2" fill={requests ? '#0f766e' : '#dbe3ec'} opacity={requests ? '0.82' : '1'} />
+                {errorHeight ? <rect x={x} y={plot.top + plotHeight - errorHeight} width={barWidth} height={errorHeight} rx="2" fill="#be123c" opacity="0.9" /> : null}
+                {idx % labelStep === 0 || idx === points.length - 1 ? (
+                  <text x={x + (barWidth / 2)} y={height - 23} textAnchor="middle" fontSize="11" fill="#64748b">{formatChartAxis(item.ts, idx, points.length)}</text>
+                ) : null}
+              </g>
             );
           })}
-        </div>
-        <div className="mt-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-          <span>Older</span>
-          <span>Now</span>
-        </div>
+          <text x="12" y={plot.top + (plotHeight / 2)} textAnchor="middle" fontSize="11" fill="#64748b" transform={`rotate(-90 12 ${plot.top + (plotHeight / 2)})`}>Requests</text>
+          <text x={plot.left} y={height - 6} textAnchor="start" fontSize="11" fill="#64748b">Older</text>
+          <text x={width - plot.right} y={height - 6} textAnchor="end" fontSize="11" fill="#64748b">Now</text>
+        </svg>
       </div>
     </div>
   );
@@ -268,6 +287,13 @@ function formatDateTime(value) {
 
 function formatChartTime(value) {
   if (!value) return 'No traffic';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatChartAxis(value, index, total) {
+  if (!value) return index === total - 1 ? 'Now' : '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

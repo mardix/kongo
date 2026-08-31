@@ -799,6 +799,7 @@ The same patch behavior applies to Identity `user_update.data` and File `file_up
 | Property | Type | Default | Description |
 |---|---:|---:|---|
 | `data` | object or object[] | Required | Patch object(s). Explicit-ID modes require `_id` on every object. |
+| `metadata` | object | None | Replaces the separate `_metadata` JSON/JSONB object for one explicit-ID update. It can be used by itself with `data:{"_id":"..."}` or alongside a data patch; it is rejected for filter and array updates. |
 | `filter` | object | None | Non-empty filter expression for shared-patch mode. It cannot be combined with an array. |
 | `replace` | bool | `false` | Fully replaces one explicit-ID document while preserving `_id`. Rejected for arrays and filter mode. |
 | `lifecycle` | object or object[] | None | Single explicit-ID mode only. Atomically creates or replaces named transitions after the update. Existing transitions with other names remain. |
@@ -810,6 +811,8 @@ The same patch behavior applies to Identity `user_update.data` and File `file_up
 An explicit-ID update without a namespace searches globally by `_id`. Supplying a namespace ensures the document belongs to that namespace. Missing IDs are skipped, not created.
 
 Updates reject `_created_at`, `_modified_at`, and paths rooted at either field in `data` or `update_data`. The stored `_created_at` is always preserved, while `_modified_at` is generated automatically in UTC after a successful change. This rule also applies to transaction, upsert-update, accepted-write, and lifecycle-update paths. Imported timestamps are supported only by insert/import flows that explicitly allow system timestamps.
+
+`metadata` is maintained separately from the document body. It must be a JSON object and replaces the complete `_metadata` object; use an empty object to clear it. Metadata updates require one explicit `data._id`, may omit all other data fields, update `_modified_at`, and follow the request's normal committed or accepted acknowledgement mode. They are intentionally not supported in filter or array update modes because those modes can target multiple documents.
 
 ##### Patch One Document
 
@@ -5189,7 +5192,7 @@ The TTL reaper checks active databases on its fixed interval but only publishes 
 
 | Config Name | Default | Description |
 |---|---:|---|
-| `KONGODB_CACHE_TTL_SECS` | `15` | Default read-cache TTL; `0` disables the read cache. |
+| `KONGODB_CACHE_TTL_SECS` | `60` | Default read-cache TTL; `0` disables the read cache. |
 | `KONGODB_WRITE_MODE` | `committed` | `direct`, `committed`, or `accepted`. `direct` bypasses the coordinator; `committed` waits; `accepted` queues and acknowledges. Request `payload.commit` overrides committed vs accepted. |
 | `KONGODB_QUERY_DEFAULT_LIMIT` | `50` | Default query and per-lookup limit. |
 | `KONGODB_QUERY_MULTI_MAX_QUERIES` | `20` | Maximum child queries accepted by one read-only `multi_query` request. |

@@ -1375,7 +1375,7 @@ Idle TTL reaper checks do not publish snapshots. A reaper checkpoint is created 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `KONGODB_CACHE_TTL_SECS` | `15` | Read cache TTL; `0` disables the read cache entirely |
+| `KONGODB_CACHE_TTL_SECS` | `60` | Read cache TTL; `0` disables the read cache entirely |
 | `KONGODB_WRITE_MODE` | `committed` | `direct` bypasses the write coordinator · `committed` waits for the durable result · `accepted` queues and acknowledges immediately |
 | `KONGODB_QUERY_DEFAULT_LIMIT` | `50` | Default page size when `limit`/`offset` are omitted |
 | `KONGODB_QUERY_MULTI_MAX_QUERIES` | `20` | Maximum child queries in one `multi_query` request |

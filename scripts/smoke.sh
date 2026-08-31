@@ -175,7 +175,7 @@ if ! grep -Eq '"name":"Alice".*"name":"Bob"' <<<"$SORT_STR_Q"; then
   exit 1
 fi
 
-ARRAY_PATH_SEED="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"insert","namespace":"array_paths","payload":{"commit":true,"data":[{"_id":"array-1","people":[{"name":"Ada","age":16},{"name":"Bob","age":30}],"departments":[{"teams":[{"members":[{"name":"Ada"}]}]}],"shipments":[{"status":"processing","warehouse":{"region":"us-east"},"items":[{"sku":"A1","qty":2,"tags":["priority"]},{"sku":"B2","qty":1,"tags":[]}]}},{"_id":"array-2","people":[{"name":"Grace","age":40}] }]}}')"
+ARRAY_PATH_SEED="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"insert","namespace":"array_paths","payload":{"commit":true,"data":[{"_id":"array-1","people":[{"name":"Ada","age":16},{"name":"Bob","age":30}],"departments":[{"teams":[{"members":[{"name":"Ada"}]}]}],"shipments":[{"status":"processing","warehouse":{"region":"us-east"},"items":[{"sku":"A1","qty":2,"tags":["priority"]},{"sku":"B2","qty":1,"tags":[]}]}],"profile":{"legacy_name":"Ada Legacy","display_name":"Old Name"}},{"_id":"array-2","people":[{"name":"Grace","age":40}]}]}}')"
 assert_contains "$ARRAY_PATH_SEED" '"inserted_count":2' "array path seed should succeed"
 ARRAY_PATH_Q="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"query","namespace":"array_paths","payload":{"filter":{"people[].name":"Ada","people[].age":{"$gte":18}}}}')"
 assert_contains "$ARRAY_PATH_Q" '"_id":"array-1"' "independent array path predicates should match different elements"

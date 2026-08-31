@@ -1304,6 +1304,7 @@ async fn prepare_pending_insert_preview(
     let payload = req.payload.clone();
     let collection = require_collection(&payload)?;
     let payload_user_id = clean_optional(payload.document_user_id.clone());
+    let metadata = normalize_document_metadata(payload.metadata.clone())?;
     let bulk = matches!(payload.data.as_ref(), Some(Value::Array(_)));
     let mut docs = prepare_insert_documents(payload.data, bulk)?.docs;
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -1321,6 +1322,13 @@ async fn prepare_pending_insert_preview(
         let mut item = doc.clone();
         attach_document_user_id(&mut item, user_id.clone());
         attach_system_timestamps(&mut item, Some(now.clone()), Some(now.clone()));
+        if let Some(metadata) = metadata.as_ref() {
+            if let Ok(metadata) = serde_json::from_str::<Value>(metadata) {
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("_metadata".to_string(), metadata);
+                }
+            }
+        }
         let revision =
             state.put_pending_document(db_path, &id, Some(collection.clone()), item.clone());
         revisions.push(crate::state::PendingWriteRevision {
@@ -1356,6 +1364,7 @@ async fn prepare_pending_update_preview(
     req: &GatewayRequest,
 ) -> AppResult<crate::state::PendingWritePreview> {
     let payload = req.payload.clone();
+    let metadata = normalize_document_metadata(payload.metadata.clone())?;
     reject_update_system_timestamps(payload.data.as_ref(), "data")?;
     let collection = resolve_collection_scope_optional_collection(&payload)?;
     let conn = state
@@ -1388,9 +1397,10 @@ async fn prepare_pending_update_preview(
             .ok_or_else(|| AppError::BadRequest("update data._id is required".to_string()))?
             .to_string();
         patch_obj.remove("_id");
-        if patch_obj.is_empty() {
+        if patch_obj.is_empty() && metadata.is_none() {
             return Err(AppError::BadRequest(
-                "update data must include fields beyond _id".to_string(),
+                "update data must include fields beyond _id or metadata must be provided"
+                    .to_string(),
             ));
         }
         let mut base = if let Some(pending) = state.get_pending_document(db_path, &id) {
@@ -1405,6 +1415,7 @@ async fn prepare_pending_update_preview(
                 collection.as_deref(),
                 std::slice::from_ref(&id),
                 true,
+                true,
             )
             .await?;
             let Some(doc) = durable.into_iter().next() else {
@@ -1413,18 +1424,34 @@ async fn prepare_pending_update_preview(
             doc
         };
 
+        let existing_metadata = base.get("_metadata").cloned();
         if payload.replace.unwrap_or(false) {
             let mut replacement = Value::Object(patch_obj);
             base = replacement_doc_from_payload(&mut replacement, &id)?;
-        } else if payload.array_filters.is_some() || update_requires_mutation_engine(&patch_obj) {
+        } else if !patch_obj.is_empty()
+            && (payload.array_filters.is_some() || update_requires_mutation_engine(&patch_obj))
+        {
             apply_mutation_patch_to_doc(
                 &mut base,
                 &mut patch_obj,
                 payload.array_filters.as_ref(),
                 state.strict_mutation_operators,
             )?;
-        } else {
+        } else if !patch_obj.is_empty() {
             apply_merge_patch_object(&mut base, &patch_obj)?;
+        }
+        if let Some(metadata) = metadata.as_ref() {
+            if let Ok(metadata) = serde_json::from_str::<Value>(metadata) {
+                if let Some(object) = base.as_object_mut() {
+                    object.insert("_metadata".to_string(), metadata);
+                }
+            }
+        } else if payload.replace.unwrap_or(false) {
+            if let Some(metadata) = existing_metadata {
+                if let Some(object) = base.as_object_mut() {
+                    object.insert("_metadata".to_string(), metadata);
+                }
+            }
         }
         attach_system_timestamps(&mut base, None, Some(now.clone()));
         let revision = state.put_pending_document(db_path, &id, collection.clone(), base.clone());

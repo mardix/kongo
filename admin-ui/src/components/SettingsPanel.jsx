@@ -98,7 +98,7 @@ export function SettingsPanel() {
             {connections.map((conn) => {
               const active = conn.id === activeConnectionId && mode !== 'new';
               return (
-                <button key={conn.id} type="button" onClick={() => selectConnection(conn.id)} className={`w-full rounded-xl border px-3 py-3 text-left transition ${active ? 'border-primary bg-primary/10' : 'border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5'}`}>
+                <button key={conn.id} type="button" onClick={() => selectConnection(conn.id)} className={`w-full rounded-md border px-3 py-3 text-left transition ${active ? 'border-primary bg-primary/10' : 'border-slate-200 bg-white hover:border-primary/40 hover:bg-primary/5'}`}>
                   <div className="flex items-center justify-between gap-2">
                     <div className="truncate text-sm font-semibold text-slate-950">{conn.settings.name || 'Connection'}</div>
                     {active ? <span className="rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-white">Active</span> : null}

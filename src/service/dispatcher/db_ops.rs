@@ -209,6 +209,8 @@ async fn system_get_inventory(state: &AppState, req: GatewayRequest) -> AppResul
 async fn system_refresh_inventory(state: &AppState) -> AppResult<GatewayResponse> {
     let catalog = require_system_catalog(state)?;
     let records = collect_system_inventory_records(state).await?;
+    let known_dbs = records.iter().map(|record| record.db.clone()).collect::<Vec<_>>();
+    let removed = catalog.prune_db_inventory(&known_dbs).await?;
     for record in &records {
         catalog.upsert_db(record).await?;
     }
@@ -218,12 +220,13 @@ async fn system_refresh_inventory(state: &AppState) -> AppResult<GatewayResponse
             event: "system.inventory_refreshed".to_string(),
             level: "info".to_string(),
             message: Some(format!("refreshed {} dbs", records.len())),
-            metadata: Some(json!({ "count": records.len() })),
+            metadata: Some(json!({ "count": records.len(), "removed": removed })),
         })
         .await?;
     Ok(GatewayResponse::ok(Some(json!({
         "catalog_enabled": true,
         "refreshed": records.len(),
+        "removed": removed,
         "items": records.into_iter().map(system_db_record_to_json).collect::<Vec<_>>()
     }))))
 }

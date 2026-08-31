@@ -147,7 +147,7 @@ export function DocumentUiEditor({
             actions={{ updateNode, changeType, toggleExpanded, addChild, removeNode, duplicateNode, moveNode }}
           />
         )) : (
-          <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center">
+          <div className="rounded-md border border-dashed border-slate-300 bg-white p-8 text-center">
             <div className="text-sm font-semibold text-slate-800">Empty Document</div>
             <p className="mt-1 text-xs text-slate-500">{readOnly ? 'This document contains an empty JSON object.' : 'Add the first field to start building this JSON object.'}</p>
             {!readOnly ? <div className="mt-4 flex justify-center"><AddValueMenu label="Add First Field" onAdd={addRootField} primary /></div> : null}
@@ -292,10 +292,10 @@ function DocumentTreeValue({ node }) {
       ) : null}
       {modalOpen ? createPortal(
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-label="Full field value">
-          <div className="flex max-h-[88vh] w-full max-w-4xl flex-col rounded-xl border border-slate-300 bg-white">
+          <div className="flex max-h-[88vh] w-full max-w-4xl flex-col rounded-md border border-slate-300 bg-white shadow-2xl">
             <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
               <h3 className="text-base font-bold text-slate-950">Full Field Value</h3>
-              <button type="button" onClick={() => setModalOpen(false)} className="btn-secondary">Close</button>
+              <button type="button" onClick={() => setModalOpen(false)} className="modal-close" aria-label="Close Full Field Value" title="Close"><span aria-hidden="true">&times;</span></button>
             </div>
             <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-sm text-slate-800">{value}</pre>
           </div>
