@@ -582,7 +582,7 @@ Use Generator Operators to create values during writes.
 
 | Operation | Required Field | Description |
 |---|---|---|
-| `Generate value` | Exact single-key operator object | `$ts_now`, `$ts_now_ms`, `$id_uuidv4`, `$id_uuidv7`, `$id_random`, `$hash_value` |
+| `Generate value` | Exact known single-key `@` directive object | `@now`, `@timestamp`, `@uuidv4`, `@uuidv7`, `@randomid`, `@hash` |
 
 ### Mutation Operators (`update` data)
 Use Mutation Operators to transform existing document values.
@@ -676,7 +676,7 @@ Creates one or many new JSON documents in one namespace. Use `insert` when the r
 | `commit` | bool | Runtime default | Selects committed or accepted acknowledgement. |
 | `dry_run` | bool | `false` | Reports how many documents would be inserted or skipped. |
 
-If `_id` is absent, KiDB generates a dashless UUIDv4. If `_id` is supplied, it must be a non-empty string. Generator Operators such as `$id_uuidv4` and `$ts_now` are expanded before persistence.
+If `_id` is absent, KiDB generates a dashless UUIDv4. If `_id` is supplied, it must be a non-empty string. Generator Operators such as `@uuidv4` and `@now` are expanded before persistence.
 
 ##### Insert One
 
@@ -723,8 +723,8 @@ If `_id` is absent, KiDB generates a dashless UUIDv4. If `_id` is supplied, it m
     "ttl_seconds": 7200,
     "expiry_behavior": "delete",
     "data": {
-      "_id": {"$id_uuidv4": {"prefix": "session_"}},
-      "created_by_app_at": {"$ts_now": true},
+      "_id": {"@uuidv4": {"prefix": "session_"}},
+      "created_by_app_at": {"@now": true},
       "state": "active"
     }
   }
@@ -943,7 +943,7 @@ A literal `filter._id` or `filter._id.$eq` string becomes the inserted `_id` whe
       "login_count": 1
     },
     "update_data": {
-      "last_seen": {"$ts_now": true},
+      "last_seen": {"@now": true},
       "login_count": {"$inc": 1}
     },
     "max_docs": 1
@@ -1880,7 +1880,7 @@ A singular insert can create the document and its transitions in the same SQLite
       },
       "update": {
         "status": "expired",
-        "expired_at": {"$ts_now": true}
+        "expired_at": {"@now": true}
       }
     }
   }
@@ -1906,7 +1906,7 @@ An explicit-ID update may atomically alter a document and schedule multiple inde
         "name": "publish",
         "at": "2026-08-10T14:00:00Z",
         "when": {"status": "scheduled"},
-        "update": {"status": "published", "published_at": {"$ts_now": true}}
+        "update": {"status": "published", "published_at": {"@now": true}}
       },
       {
         "name": "expire",
@@ -1961,7 +1961,7 @@ Creates or replaces one named transition without otherwise modifying the documen
     "when": {"payment.status": {"$ne": "paid"}},
     "update": {
       "status": "cancelled",
-      "cancelled_at": {"$ts_now": true},
+      "cancelled_at": {"@now": true},
       "events": {"$push": {"type": "payment_timeout"}}
     }
   }
@@ -3368,16 +3368,188 @@ Returned item:
 
 ##### Generator Operators
 
-Generator Operators are exact single-key objects embedded anywhere in `data`, `insert_data`, or `update_data`. KiDB resolves recognized operators before persistence. A normal document key that merely starts with `$` is not treated as a generator unless the complete single-key object matches a supported operator.
+Generator Operators are exact known single-key `@` directive objects embedded anywhere in `data`, `insert_data`, or `update_data`. KiDB resolves recognized directives before persistence. Unknown `@` keys and objects with additional sibling keys remain ordinary document data.
 
 | Operator | Operand | Definition | Example |
 |---|---|---|---|
-| `$ts_now` | `true`, scalar, or shift object | Current UTC RFC3339 timestamp. A shift object accepts signed `days`, `hours`, `minutes`, and `seconds`. | `{"$ts_now":{"days":1,"minutes":30}}` |
-| `$ts_now_ms` | `true`, scalar, or shift object | Current UTC Unix epoch milliseconds after applying the same optional shift. | `{"$ts_now_ms":{"seconds":-30}}` |
-| `$id_uuidv4` | `true` or options object | Random UUIDv4. Options: `prefix`, `suffix`, `dash`; `dash` defaults to `false`. | `{"$id_uuidv4":{"prefix":"session:","dash":false}}` |
-| `$id_uuidv7` | `true` or options object | Time-ordered UUIDv7 with the same options. | `{"$id_uuidv7":{"prefix":"evt_"}}` |
-| `$id_random` | `true` or options object | Random hexadecimal identifier. Default length is `12`; options are `len` from `1` to `128`, `prefix`, and `suffix`. | `{"$id_random":{"len":8,"prefix":"tmp_"}}` |
-| `$hash_value` | Options object | SHA-256 hash of required string `value`. Options: `algo:"sha256"`, `len` from `1` to `64`, `prefix`, and `suffix`. | `{"$hash_value":{"value":"Ada","len":12}}` |
+| `@now` | `true`, scalar, or options object | Current UTC RFC3339 datetime. Options accept signed `days`, `hours`, `minutes`, and `seconds`, plus an optional Chrono/strftime `format` string. | `{"@now":{"days":1,"format":"%Y-%m-%d"}}` |
+| `@timestamp` | `true`, scalar, or shift object | Current Unix epoch milliseconds after applying optional signed `days`, `hours`, `minutes`, and `seconds`. Formatting is not supported because the result is numeric. | `{"@timestamp":{"seconds":-30}}` |
+| `@uuidv4` | `true` or options object | Random UUIDv4. Options: `prefix`, `suffix`, `dash`; `dash` defaults to `false`. | `{"@uuidv4":{"prefix":"session:","dash":false}}` |
+| `@uuidv7` | `true` or options object | Time-ordered UUIDv7 with the same options. | `{"@uuidv7":{"prefix":"evt_"}}` |
+| `@randomid` | `true` or options object | Secure random identifier. Default length is `12` and default alphabet is `hex`. Options: `len` from `1` to `128`, `alphabet` (`hex`, `numeric`, `base32`, or `base62`), `prefix`, and `suffix`. | `{"@randomid":{"len":8,"alphabet":"base62","prefix":"tmp_"}}` |
+| `@hash` | Options object | SHA-256 hash of required string `value`. Options: `algo:"sha256"`, `len` from `1` to `64`, `prefix`, and `suffix`. | `{"@hash":{"value":"Ada","len":12}}` |
+
+Generator directives are evaluated recursively immediately before the write is persisted. Each occurrence is evaluated independently, including occurrences inside array items and nested objects. A recognized directive with an invalid operand or unknown option is rejected rather than stored. Prefixes and suffixes are included in the returned string but do not count toward `len`.
+
+###### `@now` options
+
+`@now:true` returns the current UTC datetime using the default `%Y-%m-%dT%H:%M:%SZ` format. An options object can shift the current instant, format the result, or do both. Shifts are applied before formatting.
+
+| Option | Type | Default | Behavior |
+|---|---:|---:|---|
+| `days` | signed integer | `0` | Adds or subtracts fixed 24-hour periods. |
+| `hours` | signed integer | `0` | Adds or subtracts hours. |
+| `minutes` | signed integer | `0` | Adds or subtracts minutes. |
+| `seconds` | signed integer | `0` | Adds or subtracts seconds. |
+| `format` | non-empty string | `%Y-%m-%dT%H:%M:%SZ` | Formats the shifted UTC datetime using Chrono/strftime tokens. |
+
+Positive shift values move forward and negative values move backward:
+
+```json
+{
+  "current": {"@now": true},
+  "two_hours_from_now": {"@now": {"hours": 2}},
+  "yesterday": {"@now": {"days": -1, "format": "%F"}},
+  "retention_deadline": {
+    "@now": {
+      "days": 30,
+      "hours": 6,
+      "format": "%Y-%m-%dT%H:%M:%SZ"
+    }
+  }
+}
+```
+
+Month and year shifts are intentionally unsupported because they have variable lengths. The application should calculate calendar-relative dates when month-end, leap-year, locale, or user-timezone behavior matters.
+
+Common `@now.format` tokens:
+
+| Token | Example | Meaning |
+|---|---|---|
+| `%Y` | `2026` | Four-digit year. |
+| `%y` | `26` | Two-digit year. |
+| `%q` | `3` | Quarter from `1` through `4`. |
+| `%m` | `08` | Zero-padded month number. |
+| `%b` | `Aug` | Abbreviated month name. |
+| `%B` | `August` | Full month name. |
+| `%d` | `31` | Zero-padded day of month. |
+| `%j` | `243` | Zero-padded day of year from `001` through `366`. |
+| `%a` | `Mon` | Abbreviated weekday name. |
+| `%A` | `Monday` | Full weekday name. |
+| `%u` | `1` | ISO weekday where Monday is `1` and Sunday is `7`. |
+| `%V` | `36` | ISO week number from `01` through `53`. |
+| `%F` | `2026-08-31` | ISO date; equivalent to `%Y-%m-%d`. |
+| `%H` | `17` | Zero-padded 24-hour clock hour. |
+| `%I` | `05` | Zero-padded 12-hour clock hour. |
+| `%M` | `44` | Zero-padded minute. |
+| `%S` | `56` | Zero-padded second. |
+| `%p` | `PM` | Uppercase `AM` or `PM`. |
+| `%R` | `17:44` | Hour and minute; equivalent to `%H:%M`. |
+| `%T` | `17:44:56` | Hour, minute, and second; equivalent to `%H:%M:%S`. |
+| `%.3f` | `.275` | Millisecond fraction including the leading decimal point. |
+| `%z` | `+0000` | UTC offset without a colon. Kongo evaluates `@now` in UTC. |
+| `%:z` | `+00:00` | UTC offset with a colon. |
+| `%+` | `2026-08-31T17:44:56.275+00:00` | ISO 8601/RFC3339 datetime. |
+| `%s` | `1788198296` | Unix timestamp in whole seconds, formatted as a string. |
+| `%%` | `%` | Literal percent character. |
+
+Format examples:
+
+```json
+{
+  "year": {"@now": {"format": "%Y"}},
+  "date": {"@now": {"format": "%F"}},
+  "time": {"@now": {"format": "%T"}},
+  "with_milliseconds": {"@now": {"format": "%Y-%m-%dT%H:%M:%S%.3fZ"}},
+  "week_key": {"@now": {"format": "%Y-W%V"}}
+}
+```
+
+###### `@timestamp` options
+
+`@timestamp` returns the current Unix timestamp in milliseconds as a JSON integer. It accepts the same signed `days`, `hours`, `minutes`, and `seconds` shifts as `@now`. It does not accept `format`; use `@now` when a formatted string is required.
+
+```json
+{
+  "created_ms": {"@timestamp": true},
+  "expires_ms": {"@timestamp": {"minutes": 15}},
+  "five_seconds_ago_ms": {"@timestamp": {"seconds": -5}}
+}
+```
+
+###### `@uuidv4` and `@uuidv7` options
+
+`@uuidv4` produces a random UUID. `@uuidv7` embeds time ordering into the UUID and is preferable when lexicographically sortable identifiers improve index locality. Both accept the same options.
+
+| Option | Type | Default | Behavior |
+|---|---:|---:|---|
+| `prefix` | string | `""` | Text prepended to the UUID. |
+| `suffix` | string | `""` | Text appended to the UUID. |
+| `dash` | bool | `false` | When `true`, uses the standard dashed UUID representation; otherwise returns 32 hexadecimal characters. |
+
+```json
+{
+  "random_uuid": {"@uuidv4": true},
+  "ordered_uuid": {"@uuidv7": true},
+  "session_id": {
+    "@uuidv4": {
+      "prefix": "session_",
+      "suffix": "_primary",
+      "dash": false
+    }
+  }
+}
+```
+
+###### `@randomid` options and alphabets
+
+`@randomid` produces an unbiased secure random string. `len` controls only the generated portion, before `prefix` and `suffix` are added.
+
+| Option | Type | Default | Behavior |
+|---|---:|---:|---|
+| `len` | integer from `1` to `128` | `12` | Number of generated characters. |
+| `alphabet` | string | `hex` | Selects the allowed character set. |
+| `prefix` | string | `""` | Text prepended to the generated characters. |
+| `suffix` | string | `""` | Text appended to the generated characters. |
+
+| Alphabet | Character set | Size | Typical use |
+|---|---|---:|---|
+| `hex` | `0123456789abcdef` | 16 | Lowercase hexadecimal IDs and identifiers compatible with hex-only systems. |
+| `numeric` | `0123456789` | 10 | Numeric reference codes. Leading zeroes are preserved because the result is a string. |
+| `base32` | `0123456789ABCDEFGHJKMNPQRSTVWXYZ` | 32 | Crockford-style, case-insensitive-friendly IDs that omit visually ambiguous `I`, `L`, `O`, and `U`. |
+| `base62` | `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz` | 62 | Most compact case-sensitive identifiers from common URL-safe alphanumeric characters. |
+
+```json
+{
+  "default_hex": {"@randomid": true},
+  "pin": {"@randomid": {"len": 6, "alphabet": "numeric"}},
+  "readable_code": {"@randomid": {"len": 10, "alphabet": "base32"}},
+  "public_id": {
+    "@randomid": {
+      "len": 20,
+      "alphabet": "base62",
+      "prefix": "pub_"
+    }
+  }
+}
+```
+
+###### `@hash` options
+
+`@hash` deterministically hashes one string and returns lowercase hexadecimal output.
+
+| Option | Type | Default | Behavior |
+|---|---:|---:|---|
+| `value` | string | Required | Input string to hash. |
+| `algo` | string | `sha256` | Hash algorithm. Only `sha256` is currently accepted. |
+| `len` | integer from `1` to `64` | `64` | Truncates the hexadecimal digest to this many characters before adding prefix/suffix. |
+| `prefix` | string | `""` | Text prepended to the digest. |
+| `suffix` | string | `""` | Text appended to the digest. |
+
+```json
+{
+  "full_hash": {"@hash": {"value": "Ada"}},
+  "short_hash": {
+    "@hash": {
+      "value": "Ada",
+      "len": 16,
+      "prefix": "sha256_"
+    }
+  }
+}
+```
+
+`@hash` is not password hashing, encryption, or HMAC signing. Passwords, authentication tokens, and keyed signatures should be processed by the application using an appropriate security-specific mechanism.
 
 Complete write:
 
@@ -3388,13 +3560,14 @@ Complete write:
   "namespace": "sessions",
   "payload": {
     "data": {
-      "_id": {"$id_uuidv4": {"prefix": "session:"}},
-      "event_id": {"$id_uuidv7": true},
-      "short_code": {"$id_random": {"len": 8, "prefix": "code_"}},
-      "created_at": {"$ts_now": true},
-      "expires_at": {"$ts_now": {"hours": 2}},
-      "created_ms": {"$ts_now_ms": true},
-      "email_hash": {"$hash_value": {"value": "ada@example.com", "len": 16}}
+      "_id": {"@uuidv4": {"prefix": "session:"}},
+      "event_id": {"@uuidv7": true},
+      "short_code": {"@randomid": {"len": 8, "alphabet": "base62", "prefix": "code_"}},
+      "created_at": {"@now": true},
+      "expires_at": {"@now": {"hours": 2}},
+      "date_key": {"@now": {"format": "%Y-%m-%d"}},
+      "created_ms": {"@timestamp": true},
+      "email_hash": {"@hash": {"value": "ada@example.com", "len": 16}}
     }
   }
 }
@@ -5266,7 +5439,7 @@ These examples provide compact forms of the document operations documented in de
 { "db":"myapp/main", "operation":"update", "namespace":"users", "payload":{"data":{"_id":"u1","name":"Ada L"}} }
 { "db":"myapp/main", "operation":"update", "namespace":"users", "payload":{"filter":{"_id":{"$in":["u1","u2"]}},"data":{"plan":"pro"}} }
 { "db":"myapp/main", "operation":"update", "namespace":"users", "payload":{"replace":true,"data":{"_id":"u1","name":"Ada","plan":"pro"}} }
-{ "db":"myapp/main", "operation":"upsert", "namespace":"users", "payload":{"filter":{"email":{"$eq":"a@b.com"}},"insert_data":{"email":"a@b.com"},"update_data":{"last_seen":{"$ts_now":true}}} }
+{ "db":"myapp/main", "operation":"upsert", "namespace":"users", "payload":{"filter":{"email":{"$eq":"a@b.com"}},"insert_data":{"email":"a@b.com"},"update_data":{"last_seen":{"@now":true}}} }
 { "db":"myapp/main", "operation":"query", "namespace":"*", "payload":{"filter":{"_id":{"$in":["u1","u2"]}},"fields":["name","email"]} }
 { "db":"myapp/main", "operation":"count", "namespace":"users", "payload":{"filter":{"status":{"$eq":"active"}}} }
 { "db":"myapp/main", "operation":"query", "namespace":"users", "payload":{"filter":{"age":{"$gte":18}},"sort":"age desc","limit":20} }

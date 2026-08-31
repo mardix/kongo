@@ -1385,7 +1385,8 @@ async fn prepare_pending_update_preview(
     let mut revisions = Vec::with_capacity(docs.len());
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
 
-    for patch_doc in docs {
+    for mut patch_doc in docs {
+        expand_kdb_macros_in_value(&mut patch_doc)?;
         let mut patch_obj = patch_doc
             .as_object()
             .cloned()

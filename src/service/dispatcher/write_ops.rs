@@ -422,6 +422,7 @@ async fn update_inner(
                     ));
                 }
                 let (id, mut data) = extract_single_write_doc(payload.data, "data")?;
+                expand_kdb_macros_in_value(&mut data)?;
                 if dry_run {
                     let matched = count_by_ids(conn, collection.as_deref(), &[id]).await?;
                     return Ok(GatewayResponse::ok(Some(json!({
@@ -489,6 +490,7 @@ async fn update_inner(
             }
 
             let (id, mut data) = extract_single_write_doc(payload.data, "data")?;
+            expand_kdb_macros_in_value(&mut data)?;
             data.as_object_mut().expect("object checked").remove("_id");
             if data.as_object().expect("object checked").is_empty() && metadata.is_none() {
                 return Err(AppError::BadRequest(

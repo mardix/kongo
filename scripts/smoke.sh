@@ -143,8 +143,8 @@ assert_contains "$INSERT_TS_BLOCKED" 'allow_system_timestamps' "insert timestamp
 INSERT_TS_ALLOWED="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"insert","namespace":"users","payload":{"allow_system_timestamps":true,"data":{"name":"TSAllowed","_created_at":"2024-01-01T00:00:00Z"}}}')"
 assert_contains "$INSERT_TS_ALLOWED" '"status":"success"' "insert should allow system timestamps when enabled"
 
-MACRO_INSERT="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"insert","namespace":"users","payload":{"data":{"_id":{"$id_uuidv4":{"prefix":"sessions:"}},"ts":{"$ts_now":true},"sid":{"$id_random":{"len":10}}}}}')"
-assert_contains "$MACRO_INSERT" '"status":"success"' "insert with $-macros should succeed"
+MACRO_INSERT="$(curl -sS -X POST "$GATEWAY_URL" -H 'content-type: application/json' -d '{"db":"smoke","operation":"insert","namespace":"users","payload":{"data":{"_id":{"@uuidv4":{"prefix":"sessions:"}},"ts":{"@now":true},"sid":{"@randomid":{"len":10,"alphabet":"base62"}}}}}')"
+assert_contains "$MACRO_INSERT" '"status":"success"' "insert with generator directives should succeed"
 assert_contains "$MACRO_INSERT" '"sessions:' "uuid macro should apply prefix"
 assert_contains "$MACRO_INSERT" '"ts":"' "now macro should produce timestamp"
 

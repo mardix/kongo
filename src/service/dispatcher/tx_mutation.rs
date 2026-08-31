@@ -827,7 +827,8 @@ async fn update_bulk_filter_same_patch(
     array_filters: Option<Value>,
 ) -> AppResult<GatewayResponse> {
     let filter = require_non_empty_filter(filter)?;
-    let patch = require_object(data, "data")?;
+    let mut patch = require_object(data, "data")?;
+    expand_kdb_macros_in_value(&mut patch)?;
     let strict = state.strict_mutation_operators;
     let use_mutation = array_filters.is_some()
         || update_requires_mutation_engine(patch.as_object().expect("object checked"));
@@ -1489,7 +1490,7 @@ fn expand_kdb_macros_in_value(value: &mut Value) -> AppResult<()> {
 
             if map.len() == 1 {
                 let macro_key = map.keys().next().cloned().unwrap_or_default();
-                if macro_key.starts_with('$') && is_known_kdb_macro(&macro_key) {
+                if is_known_kdb_macro(&macro_key) {
                     let arg = map
                         .get(&macro_key)
                         .cloned()
@@ -1512,41 +1513,60 @@ fn expand_kdb_macros_in_value(value: &mut Value) -> AppResult<()> {
 fn is_known_kdb_macro(key: &str) -> bool {
     matches!(
         key,
-        "$ts_now"
-            | "$ts_now_ms"
-            | "$id_uuidv4"
-            | "$id_uuidv7"
-            | "$id_random"
-            | "$hash_value"
+        "@now" | "@timestamp" | "@uuidv4" | "@uuidv7" | "@randomid" | "@hash"
     )
 }
 
 fn resolve_kdb_macro(key: &str, arg: Value) -> AppResult<Value> {
     match key {
-        "$ts_now" => resolve_kdb_now(arg),
-        "$ts_now_ms" => resolve_kdb_now_ms(arg),
-        "$id_uuidv4" => resolve_kdb_uuid(arg, false),
-        "$id_uuidv7" => resolve_kdb_uuid(arg, true),
-        "$id_random" => resolve_kdb_rand_id(arg),
-        "$hash_value" => resolve_kdb_hash(arg),
+        "@now" => resolve_kdb_now(arg),
+        "@timestamp" => resolve_kdb_timestamp(arg),
+        "@uuidv4" => resolve_kdb_uuid(arg, false),
+        "@uuidv7" => resolve_kdb_uuid(arg, true),
+        "@randomid" => resolve_kdb_rand_id(arg),
+        "@hash" => resolve_kdb_hash(arg),
         _ => Err(AppError::BadRequest(format!("unknown macro key: {key}"))),
     }
 }
 
 fn resolve_kdb_now(arg: Value) -> AppResult<Value> {
-    let dt = shifted_now(arg)?;
-    Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+    let (dt, format) = shifted_now(arg, true)?;
+    let Some(format) = format else {
+        return Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()));
+    };
+    if StrftimeItems::new(&format).any(|item| matches!(item, Item::Error)) {
+        return Err(AppError::BadRequest(
+            "@now format must be a valid Chrono/strftime format".to_string(),
+        ));
+    }
+    Ok(Value::String(dt.format(&format).to_string()))
 }
 
-fn resolve_kdb_now_ms(arg: Value) -> AppResult<Value> {
-    let dt = shifted_now(arg)?;
+fn resolve_kdb_timestamp(arg: Value) -> AppResult<Value> {
+    let (dt, _) = shifted_now(arg, false)?;
     Ok(json!(dt.timestamp_millis()))
 }
 
-fn shifted_now(arg: Value) -> AppResult<chrono::DateTime<Utc>> {
+fn shifted_now(
+    arg: Value,
+    allow_format: bool,
+) -> AppResult<(chrono::DateTime<Utc>, Option<String>)> {
     let mut dt = Utc::now();
+    let mut format = None;
     if let Value::Object(shift) = arg {
         for (k, v) in shift {
+            if k == "format" {
+                if !allow_format {
+                    return Err(AppError::BadRequest(
+                        "@timestamp does not support format".to_string(),
+                    ));
+                }
+                let value = v.as_str().map(str::trim).filter(|value| !value.is_empty()).ok_or_else(
+                    || AppError::BadRequest("@now format must be a non-empty string".to_string()),
+                )?;
+                format = Some(value.to_string());
+                continue;
+            }
             let n = v
                 .as_i64()
                 .ok_or_else(|| AppError::BadRequest(format!("{k} shift must be an integer")))?;
@@ -1557,13 +1577,13 @@ fn shifted_now(arg: Value) -> AppResult<chrono::DateTime<Utc>> {
                 "seconds" => dt + Duration::seconds(n),
                 _ => {
                     return Err(AppError::BadRequest(
-                        "now shift only supports days|hours|minutes|seconds".to_string(),
+                        "time shift only supports days|hours|minutes|seconds".to_string(),
                     ));
                 }
             };
         }
     }
-    Ok(dt)
+    Ok((dt, format))
 }
 
 fn resolve_kdb_uuid(arg: Value, use_v7: bool) -> AppResult<Value> {
@@ -1629,15 +1649,15 @@ fn resolve_kdb_uuid(arg: Value, use_v7: bool) -> AppResult<Value> {
 
 fn resolve_kdb_rand_id(arg: Value) -> AppResult<Value> {
     if arg == Value::Bool(true) {
-        let raw = Uuid::new_v4().simple().to_string();
-        return Ok(Value::String(raw.chars().take(12).collect()));
+        return Ok(Value::String(random_id_chars(12, random_id_alphabet("hex")?)));
     }
     let options = arg.as_object().ok_or_else(|| {
-        AppError::BadRequest("rand_id macro must be true or options object".to_string())
+        AppError::BadRequest("@randomid must be true or options object".to_string())
     })?;
     let mut prefix = String::new();
     let mut suffix = String::new();
     let mut len = 12usize;
+    let mut alphabet = random_id_alphabet("hex")?;
     for (k, v) in options {
         match k.as_str() {
             "prefix" => {
@@ -1667,19 +1687,53 @@ fn resolve_kdb_rand_id(arg: Value) -> AppResult<Value> {
                 }
                 len = l as usize;
             }
+            "alphabet" => {
+                let name = v.as_str().ok_or_else(|| {
+                    AppError::BadRequest("randomid alphabet must be string".to_string())
+                })?;
+                alphabet = random_id_alphabet(name)?;
+            }
             _ => {
                 return Err(AppError::BadRequest(
-                    "rand_id options only support prefix|suffix|len".to_string(),
+                    "randomid options only support prefix|suffix|len|alphabet".to_string(),
                 ));
             }
         }
     }
-    let mut out = String::with_capacity(len);
-    while out.len() < len {
-        out.push_str(&Uuid::new_v4().simple().to_string());
-    }
-    out.truncate(len);
+    let out = random_id_chars(len, alphabet);
     Ok(Value::String(format!("{prefix}{out}{suffix}")))
+}
+
+fn random_id_alphabet(name: &str) -> AppResult<&'static [u8]> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "hex" => Ok(b"0123456789abcdef"),
+        "numeric" => Ok(b"0123456789"),
+        "base32" => Ok(b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"),
+        "base62" => Ok(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"),
+        _ => Err(AppError::BadRequest(
+            "randomid alphabet must be hex|numeric|base32|base62".to_string(),
+        )),
+    }
+}
+
+fn random_id_chars(len: usize, alphabet: &[u8]) -> String {
+    let alphabet_len = alphabet.len();
+    let unbiased_limit = (256 / alphabet_len) * alphabet_len;
+    let mut output = String::with_capacity(len);
+    while output.len() < len {
+        // UUIDv4 is OS-random; hashing removes its fixed version/variant bits before sampling.
+        let digest = Sha256::digest(Uuid::new_v4().as_bytes());
+        for byte in digest {
+            if usize::from(byte) >= unbiased_limit {
+                continue;
+            }
+            output.push(alphabet[usize::from(byte) % alphabet_len] as char);
+            if output.len() == len {
+                break;
+            }
+        }
+    }
+    output
 }
 
 fn resolve_kdb_hash(arg: Value) -> AppResult<Value> {
@@ -1757,7 +1811,7 @@ fn resolve_kdb_hash(arg: Value) -> AppResult<Value> {
 fn update_requires_mutation_engine(data: &serde_json::Map<String, Value>) -> bool {
     data.iter().any(|(path, value)| {
         path.split('.').any(is_positional_selector)
-            || matches!(value, Value::Object(obj) if obj.len() == 1 && obj.keys().next().is_some_and(|key| key.starts_with('$')))
+            || matches!(value, Value::Object(obj) if obj.len() == 1 && obj.keys().next().is_some_and(|key| key.starts_with('$') || is_known_kdb_macro(key)))
     })
 }
 
@@ -3296,6 +3350,57 @@ mod transaction_tests {
 
     fn payload(value: Value) -> OperationPayload {
         serde_json::from_value(value).expect("valid operation payload")
+    }
+
+    #[test]
+    fn generator_directives_expand_and_unknown_names_remain_literal() {
+        let mut value = json!({
+            "date": {"@now": {"format": "%Y-%m-%d"}},
+            "timestamp": {"@timestamp": true},
+            "uuid": {"@uuidv4": true},
+            "unknown": {"@custom": true}
+        });
+        expand_kdb_macros_in_value(&mut value).unwrap();
+
+        let object = value.as_object().unwrap();
+        let date = object.get("date").and_then(Value::as_str).unwrap();
+        assert_eq!(date.len(), 10);
+        assert!(object.get("timestamp").is_some_and(Value::is_i64));
+        assert_eq!(object.get("uuid").and_then(Value::as_str).unwrap().len(), 32);
+        assert_eq!(object.get("unknown"), Some(&json!({"@custom": true})));
+    }
+
+    #[test]
+    fn randomid_supports_all_alphabet_presets() {
+        for (alphabet, allowed) in [
+            ("hex", "0123456789abcdef"),
+            ("numeric", "0123456789"),
+            ("base32", "0123456789ABCDEFGHJKMNPQRSTVWXYZ"),
+            (
+                "base62",
+                "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            ),
+        ] {
+            let value = resolve_kdb_rand_id(json!({
+                "len": 64,
+                "alphabet": alphabet,
+                "prefix": "pre_",
+                "suffix": "_post"
+            }))
+            .unwrap();
+            let value = value.as_str().unwrap();
+            assert!(value.starts_with("pre_") && value.ends_with("_post"));
+            let generated = &value[4..value.len() - 5];
+            assert_eq!(generated.len(), 64);
+            assert!(generated.chars().all(|ch| allowed.contains(ch)));
+        }
+    }
+
+    #[test]
+    fn generator_directives_reject_invalid_options() {
+        assert!(resolve_kdb_now(json!({"format": "%Q"})).is_err());
+        assert!(resolve_kdb_timestamp(json!({"format": "%Y"})).is_err());
+        assert!(resolve_kdb_rand_id(json!({"alphabet": "unknown"})).is_err());
     }
 
     #[test]

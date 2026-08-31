@@ -334,7 +334,7 @@ The bread and butter — documents in, documents out.
     },
     "update_data": {
       "last_seen": {
-        "$ts_now": true
+        "@now": true
       }
     }
   }
@@ -1228,10 +1228,20 @@ Supports nested lookups, context selectors (`$self`, `$parent`, `$root`, `$looku
 
 ## Generator Operators & Mutation Operators
 
-Recognized inside `data`, `insert_data`, and `update_data` as single-key `$`-operator objects.
+Recognized inside `data`, `insert_data`, and `update_data`. Generators use exact known single-key `@` directive objects; mutations use exact single-key `$` operator objects.
 
-**Generator Operators** — create values at write time:
-`$ts_now`, `$ts_now_ms`, `$id_uuidv4`, `$id_uuidv7`, `$id_random`, `$hash_value`
+**Generator Operators** — exact known `@` directives that create values at write time:
+`@now`, `@timestamp`, `@uuidv4`, `@uuidv7`, `@randomid`, `@hash`
+
+| Generator | Options |
+|---|---|
+| `@now` | Signed `days`, `hours`, `minutes`, `seconds`; optional Chrono/strftime `format`. Defaults to UTC RFC3339. |
+| `@timestamp` | Signed `days`, `hours`, `minutes`, `seconds`. Returns Unix milliseconds. |
+| `@uuidv4`, `@uuidv7` | `prefix`, `suffix`, and `dash` (default `false`). |
+| `@randomid` | `len` (`1`-`128`), `alphabet` (`hex`, `numeric`, `base32`, `base62`), `prefix`, and `suffix`. |
+| `@hash` | Required string `value`; `algo:"sha256"`, `len` (`1`-`64`), `prefix`, and `suffix`. |
+
+Common `@now.format` tokens include `%Y` year, `%m` month, `%d` day, `%H` hour, `%M` minute, `%S` second, `%F` ISO date, `%T` time, `%.3f` milliseconds, `%:z` offset, and `%+` RFC3339. See `DOCUMENTATION.md` for the complete generator option and alphabet reference.
 
 **Mutation Operators** — modify existing values in place:
 `$replace`, `$unset`, `$inc`, `$push`, `$pop`, `$extend`, `$pull`, `$addset`, `$rename`
@@ -1242,12 +1252,12 @@ Recognized inside `data`, `insert_data`, and `update_data` as single-key `$`-ope
 {
   "data": {
     "_id": {
-      "$id_uuidv4": {
+      "@uuidv4": {
         "prefix": "session:"
       }
     },
     "created_at": {
-      "$ts_now": true
+      "@now": true
     },
     "score": {
       "$inc": 1
@@ -1642,7 +1652,7 @@ Attach a durable conditional transition to a singular write. The condition is ch
       "name": "expire_invitation",
       "after_seconds": 86400,
       "when": {"accepted_at": {"$exists": false}},
-      "update": {"status": "expired", "expired_at": {"$ts_now": true}}
+      "update": {"status": "expired", "expired_at": {"@now": true}}
     }
   }
 }
