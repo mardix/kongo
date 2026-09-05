@@ -134,7 +134,7 @@ fn prepare_upsert_inputs(payload: OperationPayload) -> AppResult<UpsertPreparedI
     };
     let mut update_data = update_data;
     expand_kdb_macros_in_value(&mut update_data)?;
-    reject_update_system_timestamps(Some(&update_data), "update_data")?;
+    prepare_update_document(&mut update_data, "update_data", false)?;
 
     reject_id_field(&insert_data, "insert_data")?;
     if max_docs != 0 || !update_data.is_object() {
@@ -399,12 +399,18 @@ async fn update_inner(
     conn: &libsql::Connection,
     req: GatewayRequest,
 ) -> AppResult<GatewayResponse> {
-    let payload = req.payload;
+    let mut payload = req.payload;
     let dry_run = payload.dry_run.unwrap_or(false);
     let replace = payload.replace.unwrap_or(false);
     let array_filters = payload.array_filters.clone();
     let metadata = normalize_document_metadata(payload.metadata.clone())?;
-    reject_update_system_timestamps(payload.data.as_ref(), "data")?;
+    let user_id = normalize_document_update_user_id(payload.user_id.clone())?;
+    let allow_system_timestamps = payload.allow_system_timestamps.unwrap_or(false);
+    validate_update_reserved_document_fields(
+        payload.data.as_ref(),
+        "data",
+        allow_system_timestamps,
+    )?;
     if payload.ids.is_some() {
         return Err(AppError::BadRequest(
             "update does not accept ids; use filter with _id.$in or data array with _id"
@@ -421,8 +427,10 @@ async fn update_inner(
                         "array_filters cannot be combined with replace=true".to_string(),
                     ));
                 }
-                let (id, mut data) = extract_single_write_doc(payload.data, "data")?;
+                let (id, mut data) = extract_single_write_doc(payload.data.take(), "data")?;
                 expand_kdb_macros_in_value(&mut data)?;
+                let timestamps =
+                    prepare_update_document(&mut data, "data", allow_system_timestamps)?;
                 if dry_run {
                     let matched = count_by_ids(conn, collection.as_deref(), &[id]).await?;
                     return Ok(GatewayResponse::ok(Some(json!({
@@ -436,12 +444,6 @@ async fn update_inner(
                 let replacement = replacement_doc_from_payload(&mut data, &id)?;
                 let replacement_str = replacement.to_string();
                 let mut binds = vec![libsql::Value::Text(replacement_str.clone())];
-                let metadata_clause = if let Some(metadata) = metadata.as_ref() {
-                    binds.push(libsql::Value::Text(metadata.clone()));
-                    "_metadata = ?,"
-                } else {
-                    ""
-                };
                 binds.push(libsql::Value::Text(replacement_str));
                 let where_clause = where_id_with_scope(&mut binds, collection.as_deref(), &id);
                 let mut rows = conn
@@ -449,7 +451,6 @@ async fn update_inner(
                         &format!(
                             "UPDATE __kdb_documents
                              SET data = ?,
-                                 {metadata_clause}
                                  _size_bytes = length(?),
                                  _modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                              WHERE {where_clause}
@@ -472,13 +473,18 @@ async fn update_inner(
                         AppError::Internal(format!("update replace json decode failed: {e}"))
                     })?);
                 }
-                if let Some(metadata) = metadata.as_ref() {
-                    if let Ok(metadata) = serde_json::from_str::<Value>(metadata) {
-                        for item in &mut items {
-                            if let Some(object) = item.as_object_mut() {
-                                object.insert("_metadata".to_string(), metadata.clone());
-                            }
-                        }
+                if metadata.is_some() || user_id.is_some() || !timestamps.is_empty() {
+                    if let Some(updated) = update_document_control_fields(
+                        conn,
+                        collection.as_deref(),
+                        &id,
+                        user_id.as_deref(),
+                        metadata.as_deref(),
+                        &timestamps,
+                    )
+                    .await?
+                    {
+                        items = vec![updated];
                     }
                 }
                 return Ok(GatewayResponse::ok(Some(json!({
@@ -489,12 +495,18 @@ async fn update_inner(
                 }))));
             }
 
-            let (id, mut data) = extract_single_write_doc(payload.data, "data")?;
+            let (id, mut data) = extract_single_write_doc(payload.data.take(), "data")?;
             expand_kdb_macros_in_value(&mut data)?;
+            let timestamps = prepare_update_document(&mut data, "data", allow_system_timestamps)?;
             data.as_object_mut().expect("object checked").remove("_id");
-            if data.as_object().expect("object checked").is_empty() && metadata.is_none() {
+            if data.as_object().expect("object checked").is_empty()
+                && metadata.is_none()
+                && user_id.is_none()
+                && timestamps.is_empty()
+            {
                 return Err(AppError::BadRequest(
-                    "data must include fields to update or metadata must be provided".to_string(),
+                    "data must include fields to update, or user_id, metadata, or system timestamps must be provided"
+                        .to_string(),
                 ));
             }
             if dry_run {
@@ -567,24 +579,18 @@ async fn update_inner(
                 }
                 out
             };
-            if let Some(metadata) = metadata.as_ref() {
-                if let Some(updated) = update_document_metadata(
+            if metadata.is_some() || user_id.is_some() || !timestamps.is_empty() {
+                if let Some(updated) = update_document_control_fields(
                     conn,
                     collection.as_deref(),
                     &id,
-                    metadata,
+                    user_id.as_deref(),
+                    metadata.as_deref(),
+                    &timestamps,
                 )
                 .await?
                 {
-                    if items.is_empty() {
-                        items.push(updated);
-                    } else if let Some(updated_metadata) = updated.get("_metadata") {
-                        for item in &mut items {
-                            if let Some(object) = item.as_object_mut() {
-                                object.insert("_metadata".to_string(), updated_metadata.clone());
-                            }
-                        }
-                    }
+                    items = vec![updated];
                 }
             }
             Ok(GatewayResponse::ok(Some(json!({
@@ -595,9 +601,9 @@ async fn update_inner(
             }))))
         }
         (Some(_), Some(Value::Object(_))) => {
-            if metadata.is_some() {
+            if metadata.is_some() || user_id.is_some() {
                 return Err(AppError::BadRequest(
-                    "metadata is only supported for update with one data object containing _id"
+                    "metadata and user_id are only supported for update with one data object containing _id"
                         .to_string(),
                 ));
             }
@@ -616,13 +622,14 @@ async fn update_inner(
                 payload.max_docs,
                 dry_run,
                 array_filters,
+                allow_system_timestamps,
             )
             .await
         }
         (None, Some(Value::Array(_))) => {
-            if metadata.is_some() {
+            if metadata.is_some() || user_id.is_some() {
                 return Err(AppError::BadRequest(
-                    "metadata is only supported for update with one data object containing _id"
+                    "metadata and user_id are only supported for update with one data object containing _id"
                         .to_string(),
                 ));
             }
@@ -639,6 +646,7 @@ async fn update_inner(
                 payload.data,
                 dry_run,
                 array_filters,
+                allow_system_timestamps,
             )
             .await
         }
@@ -649,50 +657,135 @@ async fn update_inner(
     }
 }
 
-async fn update_document_metadata(
+async fn update_document_control_fields(
     conn: &libsql::Connection,
     collection: Option<&str>,
     id: &str,
-    metadata: &str,
+    user_id: Option<&str>,
+    metadata: Option<&str>,
+    timestamps: &UpdateSystemTimestamps,
 ) -> AppResult<Option<Value>> {
-    let mut binds = vec![libsql::Value::Text(metadata.to_string())];
+    let mut assignments = Vec::<String>::new();
+    let mut binds = Vec::<libsql::Value>::new();
+    if let Some(user_id) = user_id {
+        assignments.push("_user_id = ?".to_string());
+        binds.push(libsql::Value::Text(user_id.to_string()));
+    }
+    if let Some(metadata) = metadata {
+        assignments.push("_metadata = ?".to_string());
+        binds.push(libsql::Value::Text(metadata.to_string()));
+    }
+    if let Some(created_at) = timestamps.created_at.as_ref() {
+        assignments.push("_created_at = ?".to_string());
+        binds.push(libsql::Value::Text(created_at.clone()));
+    }
+    if let Some(modified_at) = timestamps.modified_at.as_ref() {
+        assignments.push("_modified_at = ?".to_string());
+        binds.push(libsql::Value::Text(modified_at.clone()));
+    } else {
+        assignments.push("_modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')".to_string());
+    }
     let where_clause = where_id_with_scope(&mut binds, collection, id);
     let mut rows = conn
         .query(
             &format!(
                 "UPDATE __kdb_documents
-                 SET _metadata = ?,
-                     _modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 SET {}
                  WHERE {where_clause}
-                 RETURNING json(data), _metadata"
+                 RETURNING json(data), _user_id, _created_at, _modified_at, json(_metadata)",
+                assignments.join(", ")
             ),
             binds,
         )
         .await
-        .map_err(|e| AppError::Internal(format!("update metadata failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("update document fields failed: {e}")))?;
     let Some(row) = rows
         .next()
         .await
-        .map_err(|e| AppError::Internal(format!("update metadata row read failed: {e}")))?
+        .map_err(|e| AppError::Internal(format!("update document fields row read failed: {e}")))?
     else {
         return Ok(None);
     };
     let raw: String = row
         .get(0)
-        .map_err(|e| AppError::Internal(format!("update metadata data decode failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("update document data decode failed: {e}")))?;
     let mut item = serde_json::from_str::<Value>(&raw)
-        .map_err(|e| AppError::Internal(format!("update metadata json decode failed: {e}")))?;
-    let metadata_value: Option<String> = row
-        .get(1)
-        .map_err(|e| AppError::Internal(format!("update metadata value decode failed: {e}")))?;
-    if let Some(metadata) = metadata_value {
-        if let Ok(metadata) = serde_json::from_str::<Value>(&metadata) {
-            if let Some(object) = item.as_object_mut() {
-                object.insert("_metadata".to_string(), metadata);
+        .map_err(|e| AppError::Internal(format!("update document json decode failed: {e}")))?;
+    let object = item
+        .as_object_mut()
+        .ok_or_else(|| AppError::Internal("updated document must be an object".to_string()))?;
+    if user_id.is_some() {
+        let value: Option<String> = row.get(1).map_err(|e| {
+            AppError::Internal(format!("update document user_id decode failed: {e}"))
+        })?;
+        if let Some(value) = value {
+            object.insert("_user_id".to_string(), Value::String(value));
+        }
+    }
+    if timestamps.created_at.is_some() {
+        let value: String = row.get(2).map_err(|e| {
+            AppError::Internal(format!("update document created_at decode failed: {e}"))
+        })?;
+        object.insert("_created_at".to_string(), Value::String(value));
+    }
+    if timestamps.modified_at.is_some() {
+        let value: String = row.get(3).map_err(|e| {
+            AppError::Internal(format!("update document modified_at decode failed: {e}"))
+        })?;
+        object.insert("_modified_at".to_string(), Value::String(value));
+    }
+    if metadata.is_some() {
+        let value: Option<String> = row.get(4).map_err(|e| {
+            AppError::Internal(format!("update document metadata decode failed: {e}"))
+        })?;
+        if let Some(value) = value {
+            if let Ok(value) = serde_json::from_str::<Value>(&value) {
+                object.insert("_metadata".to_string(), value);
             }
         }
     }
     Ok(Some(item))
+}
+
+async fn update_document_timestamps_by_rowid(
+    conn: &libsql::Connection,
+    rowid: i64,
+    timestamps: &UpdateSystemTimestamps,
+) -> AppResult<Option<Value>> {
+    let mut assignments = Vec::<String>::new();
+    let mut binds = Vec::<libsql::Value>::new();
+    if let Some(created_at) = timestamps.created_at.as_ref() {
+        assignments.push("_created_at = ?".to_string());
+        binds.push(libsql::Value::Text(created_at.clone()));
+    }
+    if let Some(modified_at) = timestamps.modified_at.as_ref() {
+        assignments.push("_modified_at = ?".to_string());
+        binds.push(libsql::Value::Text(modified_at.clone()));
+    } else {
+        assignments.push("_modified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')".to_string());
+    }
+    binds.push(libsql::Value::Integer(rowid));
+    let mut rows = conn
+        .query(
+            &format!(
+                "UPDATE __kdb_documents SET {} WHERE rowid = ? RETURNING json(data)",
+                assignments.join(", ")
+            ),
+            binds,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("update document timestamps failed: {e}")))?;
+    let Some(row) = rows.next().await.map_err(|e| {
+        AppError::Internal(format!("update document timestamps row read failed: {e}"))
+    })? else {
+        return Ok(None);
+    };
+    let raw: String = row.get(0).map_err(|e| {
+        AppError::Internal(format!("update document timestamps decode failed: {e}"))
+    })?;
+    serde_json::from_str::<Value>(&raw)
+        .map(Some)
+        .map_err(|e| AppError::Internal(format!("update document timestamps json failed: {e}")))
 }
 
 // Additional write handlers extracted from dispatcher.rs.

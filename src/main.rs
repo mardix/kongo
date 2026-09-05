@@ -598,7 +598,7 @@ async fn main() {
 mod metadata_update_repro_test {
     use super::*;
     use crate::api::dto::{GatewayRequest, NamespaceSelector, OperationPayload};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[tokio::test]
     async fn metadata_only_update_through_committed_coordinator() {
@@ -700,7 +700,8 @@ mod metadata_update_repro_test {
             namespace: Some(NamespaceSelector::One("users".to_string())),
             payload: OperationPayload {
                 collection: Some("users".to_string()),
-                data: Some(json!({"_id": "48808c9d496a45f18fe60b9604726a89"})),
+                data: Some(json!({"_id": "http-repro-1"})),
+                user_id: Some("identity-1".to_string()),
                 metadata: Some(json!({"hello": "world"})),
                 commit: Some(true),
                 ..Default::default()
@@ -710,6 +711,18 @@ mod metadata_update_repro_test {
             .await
             .unwrap();
         assert_eq!(response.status, "success");
+        let item = response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("items"))
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .expect("updated ownership/metadata item");
+        assert_eq!(
+            item.get("_user_id").and_then(Value::as_str),
+            Some("identity-1")
+        );
+        assert_eq!(item.get("_metadata"), Some(&json!({"hello": "world"})));
 
         let reserved_timestamp_request = GatewayRequest {
             db: Some(db_path.to_string()),
@@ -719,7 +732,7 @@ mod metadata_update_repro_test {
                 collection: Some("users".to_string()),
                 data: Some(json!({
                     "_created_at": "2026-07-17T01:38:57.632Z",
-                    "_id": "48808c9d496a45f18fe60b9604726a89",
+                    "_id": "http-repro-1",
                     "_modified_at": "2026-07-17T01:38:57.632Z",
                     "name": "Mike Jones"
                 })),
@@ -732,7 +745,45 @@ mod metadata_update_repro_test {
             crate::service::dispatcher::dispatch(&state, db_path, reserved_timestamp_request)
                 .await
                 .expect_err("reserved update timestamps must be rejected");
-        assert!(error.to_string().contains("cannot contain _created_at"));
+        assert!(error.to_string().contains("allow_system_timestamps=true"));
+
+        let allowed_timestamp_request = GatewayRequest {
+            db: Some(db_path.to_string()),
+            operation: "update".to_string(),
+            namespace: Some(NamespaceSelector::One("users".to_string())),
+            payload: OperationPayload {
+                collection: Some("users".to_string()),
+                data: Some(json!({
+                    "_id": "http-repro-1",
+                    "_namespace": "discard-me",
+                    "_created_at": "2026-07-17T01:38:57.632Z",
+                    "_modified_at": "2026-07-18T02:39:58.123+00:00"
+                })),
+                allow_system_timestamps: Some(true),
+                commit: Some(true),
+                ..Default::default()
+            },
+        };
+        let response =
+            crate::service::dispatcher::dispatch(&state, db_path, allowed_timestamp_request)
+                .await
+                .expect("opted-in timestamp update must succeed");
+        let item = response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("items"))
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .expect("updated item");
+        assert!(item.get("_namespace").is_none());
+        assert_eq!(
+            item.get("_created_at").and_then(Value::as_str),
+            Some("2026-07-17T01:38:57.632Z")
+        );
+        assert_eq!(
+            item.get("_modified_at").and_then(Value::as_str),
+            Some("2026-07-18T02:39:58.123Z")
+        );
     }
 }
 

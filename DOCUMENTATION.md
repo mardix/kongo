@@ -213,10 +213,10 @@ Use this table as the quick reference for common payload keys and their meanings
 | `request_id` | string | Audit correlation/request identifier |
 | `ip_address` | string | Audit source IP address supplied by the application |
 | `message` | string | Optional human-readable audit context |
-| `_user_id` | string | Document-table user reference column. For writes it is stored outside `data`; for reads it can scope results |
+| `_user_id` | string | Document-table user reference column used by insert/read operations; it is stored outside document `data` |
 | `attach_users` | bool | For `query`, side-load Identity users referenced by returned `_user_id` values |
 | `attach_user_fields` | string[] | Fields to return for attached users. Defaults to `id`, `first_name`, `last_name`, `profile_photo`; supports nested `data.*` paths |
-| `user_id` | string | Identity user id selector or caller-provided user id for `user_create` |
+| `user_id` | string | Identity user selector/caller-provided id, or the new document owner for a single explicit-ID `update` |
 | `email` | string | Identity user email or provider email |
 | `username` | string | Identity username |
 | `phone` | string | Identity user phone |
@@ -799,7 +799,9 @@ The same patch behavior applies to Identity `user_update.data` and File `file_up
 | Property | Type | Default | Description |
 |---|---:|---:|---|
 | `data` | object or object[] | Required | Patch object(s). Explicit-ID modes require `_id` on every object. |
+| `user_id` | string | None | Reassigns the document's separate `_user_id` column for one explicit-ID update. It can be used alone with `data:{"_id":"..."}` or alongside a patch; it is rejected for filter and array updates. |
 | `metadata` | object | None | Replaces the separate `_metadata` JSON/JSONB object for one explicit-ID update. It can be used by itself with `data:{"_id":"..."}` or alongside a data patch; it is rejected for filter and array updates. |
+| `allow_system_timestamps` | bool | `false` | Allows root `_created_at` and `_modified_at` values in update `data`. Values must be RFC3339 and are normalized to UTC before updating the system columns. |
 | `filter` | object | None | Non-empty filter expression for shared-patch mode. It cannot be combined with an array. |
 | `replace` | bool | `false` | Fully replaces one explicit-ID document while preserving `_id`. Rejected for arrays and filter mode. |
 | `lifecycle` | object or object[] | None | Single explicit-ID mode only. Atomically creates or replaces named transitions after the update. Existing transitions with other names remain. |
@@ -810,9 +812,53 @@ The same patch behavior applies to Identity `user_update.data` and File `file_up
 
 An explicit-ID update without a namespace searches globally by `_id`. Supplying a namespace ensures the document belongs to that namespace. Missing IDs are skipped, not created.
 
-Updates reject `_created_at`, `_modified_at`, and paths rooted at either field in `data` or `update_data`. The stored `_created_at` is always preserved, while `_modified_at` is generated automatically in UTC after a successful change. This rule also applies to transaction, upsert-update, accepted-write, and lifecycle-update paths. Imported timestamps are supported only by insert/import flows that explicitly allow system timestamps.
+`data._user_id`, `data._metadata`, and paths rooted at either field are always rejected. Use the separate `payload.user_id` and `payload.metadata` properties for a single explicit-ID update. `_namespace` and `_namespace.*` keys in update data are response-only input noise and are discarded rather than persisted.
+
+Root `_created_at` and `_modified_at` values are rejected by default. Set `allow_system_timestamps:true` to update either system column; each supplied value must be an RFC3339 datetime and is normalized to UTC. When `_modified_at` is omitted, a successful update continues to refresh it to the current UTC time. Dotted paths rooted at either timestamp remain invalid. This behavior applies to standalone updates, accepted-write previews, explicit update arrays, filter updates, and transaction updates. Upsert `update_data` and lifecycle transition patches continue to reject system timestamps.
 
 `metadata` is maintained separately from the document body. It must be a JSON object and replaces the complete `_metadata` object; use an empty object to clear it. Metadata updates require one explicit `data._id`, may omit all other data fields, update `_modified_at`, and follow the request's normal committed or accepted acknowledgement mode. They are intentionally not supported in filter or array update modes because those modes can target multiple documents.
+
+`user_id` follows the same single-document restriction. It must be a non-empty string and updates the separate `_user_id` column; it is never merged into document JSON.
+
+##### Update Ownership and Hidden Metadata
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "update",
+  "namespace": "orders",
+  "payload": {
+    "user_id": "identity-456",
+    "metadata": {"migration": "legacy-v2"},
+    "data": {
+      "_id": "order-123",
+      "status": "processed"
+    }
+  }
+}
+```
+
+Do not place `_user_id` or `_metadata` inside `data`; doing so fails the request. A returned `_namespace` copied into `data` is harmless because update strips it.
+
+##### Update System Timestamps Explicitly
+
+```json
+{
+  "db": "myapp/main",
+  "operation": "update",
+  "namespace": "orders",
+  "payload": {
+    "allow_system_timestamps": true,
+    "data": {
+      "_id": "order-123",
+      "_created_at": "2025-12-24T23:39:26.873397+00:00",
+      "_modified_at": "2026-09-05T14:30:00-04:00"
+    }
+  }
+}
+```
+
+The stored values become UTC RFC3339 timestamps (`2025-12-24T23:39:26.873Z` and `2026-09-05T18:30:00.000Z`).
 
 ##### Patch One Document
 

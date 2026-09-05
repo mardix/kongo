@@ -826,9 +826,17 @@ fn build_offsets(total_count: i64, count: usize, limit: i64, offset: i64) -> (Va
 
 fn validate_accepted_preflight(req: &GatewayRequest) -> AppResult<()> {
     match req.operation.as_str() {
-        "update" => reject_update_system_timestamps(req.payload.data.as_ref(), "data")?,
+        "update" => validate_update_reserved_document_fields(
+            req.payload.data.as_ref(),
+            "data",
+            req.payload.allow_system_timestamps.unwrap_or(false),
+        )?,
         "upsert" => {
-            reject_update_system_timestamps(req.payload.update_data.as_ref(), "update_data")?
+            validate_update_reserved_document_fields(
+                req.payload.update_data.as_ref(),
+                "update_data",
+                false,
+            )?
         }
         "transaction" => {
             for (index, operation) in req
@@ -847,13 +855,18 @@ fn validate_accepted_preflight(req: &GatewayRequest) -> AppResult<()> {
                     .map(|(name, _)| name)
                     .unwrap_or_else(|| operation.operation.as_deref().unwrap_or_default());
                 match operation_name {
-                    "update" => reject_update_system_timestamps(
+                    "update" => validate_update_reserved_document_fields(
                         operation.payload.data.as_ref(),
                         &format!("operations[{index}].payload.data"),
+                        operation
+                            .payload
+                            .allow_system_timestamps
+                            .unwrap_or(false),
                     )?,
-                    "upsert" => reject_update_system_timestamps(
+                    "upsert" => validate_update_reserved_document_fields(
                         operation.payload.update_data.as_ref(),
                         &format!("operations[{index}].payload.update_data"),
+                        false,
                     )?,
                     _ => {}
                 }
@@ -1365,7 +1378,21 @@ async fn prepare_pending_update_preview(
 ) -> AppResult<crate::state::PendingWritePreview> {
     let payload = req.payload.clone();
     let metadata = normalize_document_metadata(payload.metadata.clone())?;
-    reject_update_system_timestamps(payload.data.as_ref(), "data")?;
+    let user_id = normalize_document_update_user_id(payload.user_id.clone())?;
+    let allow_system_timestamps = payload.allow_system_timestamps.unwrap_or(false);
+    validate_update_reserved_document_fields(
+        payload.data.as_ref(),
+        "data",
+        allow_system_timestamps,
+    )?;
+    if (metadata.is_some() || user_id.is_some())
+        && (payload.filter.is_some() || matches!(payload.data, Some(Value::Array(_))))
+    {
+        return Err(AppError::BadRequest(
+            "metadata and user_id are only supported for update with one data object containing _id"
+                .to_string(),
+        ));
+    }
     let collection = resolve_collection_scope_optional_collection(&payload)?;
     let conn = state
         .db_manager
@@ -1387,6 +1414,8 @@ async fn prepare_pending_update_preview(
 
     for mut patch_doc in docs {
         expand_kdb_macros_in_value(&mut patch_doc)?;
+        let timestamps =
+            prepare_update_document(&mut patch_doc, "data", allow_system_timestamps)?;
         let mut patch_obj = patch_doc
             .as_object()
             .cloned()
@@ -1398,9 +1427,13 @@ async fn prepare_pending_update_preview(
             .ok_or_else(|| AppError::BadRequest("update data._id is required".to_string()))?
             .to_string();
         patch_obj.remove("_id");
-        if patch_obj.is_empty() && metadata.is_none() {
+        if patch_obj.is_empty()
+            && metadata.is_none()
+            && user_id.is_none()
+            && timestamps.is_empty()
+        {
             return Err(AppError::BadRequest(
-                "update data must include fields beyond _id or metadata must be provided"
+                "update data must include fields beyond _id, or user_id, metadata, or system timestamps must be provided"
                     .to_string(),
             ));
         }
@@ -1426,6 +1459,8 @@ async fn prepare_pending_update_preview(
         };
 
         let existing_metadata = base.get("_metadata").cloned();
+        let existing_user_id = base.get("_user_id").cloned();
+        let existing_created_at = base.get("_created_at").cloned();
         if payload.replace.unwrap_or(false) {
             let mut replacement = Value::Object(patch_obj);
             base = replacement_doc_from_payload(&mut replacement, &id)?;
@@ -1454,7 +1489,26 @@ async fn prepare_pending_update_preview(
                 }
             }
         }
-        attach_system_timestamps(&mut base, None, Some(now.clone()));
+        if payload.replace.unwrap_or(false) {
+            if let Some(object) = base.as_object_mut() {
+                if let Some(existing_user_id) = existing_user_id {
+                    object.insert("_user_id".to_string(), existing_user_id);
+                }
+                if let Some(existing_created_at) = existing_created_at {
+                    object.insert("_created_at".to_string(), existing_created_at);
+                }
+            }
+        }
+        if let Some(user_id) = user_id.as_ref() {
+            if let Some(object) = base.as_object_mut() {
+                object.insert("_user_id".to_string(), Value::String(user_id.clone()));
+            }
+        }
+        attach_system_timestamps(
+            &mut base,
+            timestamps.created_at,
+            Some(timestamps.modified_at.unwrap_or_else(|| now.clone())),
+        );
         let revision = state.put_pending_document(db_path, &id, collection.clone(), base.clone());
         revisions.push(crate::state::PendingWriteRevision {
             id: id.clone(),

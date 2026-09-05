@@ -100,9 +100,10 @@ fn parse_document_lifecycle(value: Option<Value>) -> AppResult<Vec<DocumentLifec
         }
         build_where(&condition)?;
 
-        let update = obj.get("update").cloned().ok_or_else(|| {
+        let mut update = obj.get("update").cloned().ok_or_else(|| {
             AppError::BadRequest("lifecycle.update is required".to_string())
         })?;
+        prepare_update_document(&mut update, "lifecycle.update", false)?;
         let update_obj = update.as_object().ok_or_else(|| {
             AppError::BadRequest("lifecycle.update must be a non-empty object".to_string())
         })?;
@@ -111,7 +112,6 @@ fn parse_document_lifecycle(value: Option<Value>) -> AppResult<Vec<DocumentLifec
                 "lifecycle.update must be a non-empty object".to_string(),
             ));
         }
-        reject_update_system_timestamps(Some(&update), "lifecycle.update")?;
         if update_obj
             .keys()
             .any(|key| key == "_id" || key.starts_with("_id."))

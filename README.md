@@ -294,7 +294,7 @@ The bread and butter — documents in, documents out.
 
 **`update`** — patch many documents by filter:
 
-`update` preserves `_created_at` and automatically refreshes `_modified_at`. Supplying either field in an update payload is rejected, including transaction, upsert-update, and lifecycle-update paths.
+`data._user_id` and `data._metadata` are rejected; use `payload.user_id` or `payload.metadata` for a single explicit-ID update. `_namespace` in update data is discarded. `_created_at` and `_modified_at` are rejected unless `payload.allow_system_timestamps:true`; opted-in values must be RFC3339 and are normalized to UTC. Upsert-update and lifecycle patches do not permit timestamp overrides.
 
 ```json
 {

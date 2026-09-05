@@ -493,9 +493,12 @@ async fn tx_insert(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
 async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppResult<()> {
     let collection = require_collection(payload)?;
     let lifecycle_specs = parse_document_lifecycle(payload.lifecycle.clone())?;
-    reject_update_system_timestamps(payload.data.as_ref(), "data")?;
+    let metadata = normalize_document_metadata(payload.metadata.clone())?;
+    let user_id = normalize_document_update_user_id(payload.user_id.clone())?;
+    let allow_system_timestamps = payload.allow_system_timestamps.unwrap_or(false);
     let mut data = require_object(payload.data.clone(), "data")?;
     expand_kdb_macros_in_value(&mut data)?;
+    let timestamps = prepare_update_document(&mut data, "data", allow_system_timestamps)?;
     let id = data
         .get("_id")
         .and_then(Value::as_str)
@@ -570,6 +573,37 @@ async fn tx_update(tx: &libsql::Transaction, payload: &OperationPayload) -> AppR
         )
         .await
         .map_err(|e| AppError::Internal(format!("transaction update failed: {e}")))?;
+    }
+    if metadata.is_some() || user_id.is_some() || !timestamps.is_empty() {
+        let mut assignments = Vec::<String>::new();
+        let mut binds = Vec::<libsql::Value>::new();
+        if let Some(user_id) = user_id {
+            assignments.push("_user_id = ?".to_string());
+            binds.push(libsql::Value::Text(user_id));
+        }
+        if let Some(metadata) = metadata {
+            assignments.push("_metadata = ?".to_string());
+            binds.push(libsql::Value::Text(metadata));
+        }
+        if let Some(created_at) = timestamps.created_at {
+            assignments.push("_created_at = ?".to_string());
+            binds.push(libsql::Value::Text(created_at));
+        }
+        if let Some(modified_at) = timestamps.modified_at {
+            assignments.push("_modified_at = ?".to_string());
+            binds.push(libsql::Value::Text(modified_at));
+        }
+        binds.push(libsql::Value::Text(collection.clone()));
+        binds.push(libsql::Value::Text(id.clone()));
+        tx.execute(
+            &format!(
+                "UPDATE __kdb_documents SET {} WHERE collection = ? AND id = ?",
+                assignments.join(", ")
+            ),
+            binds,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("transaction document fields update failed: {e}")))?;
     }
     if !lifecycle_specs.is_empty() {
         let mut rows = tx
@@ -825,15 +859,18 @@ async fn update_bulk_filter_same_patch(
     max_docs: Option<i64>,
     dry_run: bool,
     array_filters: Option<Value>,
+    allow_system_timestamps: bool,
 ) -> AppResult<GatewayResponse> {
     let filter = require_non_empty_filter(filter)?;
     let mut patch = require_object(data, "data")?;
     expand_kdb_macros_in_value(&mut patch)?;
+    let timestamps = prepare_update_document(&mut patch, "data", allow_system_timestamps)?;
     let strict = state.strict_mutation_operators;
     let use_mutation = array_filters.is_some()
+        || !timestamps.is_empty()
         || update_requires_mutation_engine(patch.as_object().expect("object checked"));
     let patch_obj = patch.as_object().expect("object checked");
-    if patch_obj.is_empty() {
+    if patch_obj.is_empty() && timestamps.is_empty() {
         return Err(AppError::BadRequest("data cannot be empty".to_string()));
     }
 
@@ -871,16 +908,22 @@ async fn update_bulk_filter_same_patch(
                 .as_object()
                 .cloned()
                 .ok_or_else(|| AppError::BadRequest("data must be object".to_string()))?;
-            if let Some(v) = update_one_by_rowid_with_mutation(
-                conn,
-                rowid,
-                &mut patch_obj,
-                array_filters.as_ref(),
-                strict,
-                state.jsonb_enabled,
-            )
-            .await?
-            {
+            let updated = if patch_obj.is_empty() {
+                None
+            } else {
+                update_one_by_rowid_with_mutation(
+                    conn,
+                    rowid,
+                    &mut patch_obj,
+                    array_filters.as_ref(),
+                    strict,
+                    state.jsonb_enabled,
+                )
+                .await?
+            };
+            if let Some(v) = update_document_timestamps_by_rowid(conn, rowid, &timestamps).await? {
+                out.push(v);
+            } else if let Some(v) = updated {
                 out.push(v);
             }
         }
@@ -942,6 +985,7 @@ async fn update_bulk_data_array(
     data: Option<Value>,
     dry_run: bool,
     array_filters: Option<Value>,
+    allow_system_timestamps: bool,
 ) -> AppResult<GatewayResponse> {
     let mut arr = data
         .ok_or_else(|| AppError::BadRequest("data is required".to_string()))?
@@ -953,8 +997,10 @@ async fn update_bulk_data_array(
         return Err(AppError::BadRequest("data cannot be empty".to_string()));
     }
 
-    for item in &mut arr {
-        expand_kdb_macros_in_value(item)?;
+    let mut prepared = Vec::<(Value, UpdateSystemTimestamps)>::with_capacity(arr.len());
+    for mut item in arr.drain(..) {
+        expand_kdb_macros_in_value(&mut item)?;
+        let timestamps = prepare_update_document(&mut item, "data[]", allow_system_timestamps)?;
         let obj = item
             .as_object()
             .ok_or_else(|| AppError::BadRequest("all data items must be objects".to_string()))?;
@@ -963,21 +1009,22 @@ async fn update_bulk_data_array(
                 "all data items must include _id".to_string(),
             ));
         }
+        prepared.push((item, timestamps));
     }
 
     if dry_run {
         return Ok(GatewayResponse::ok(Some(json!({
             "items": [],
-            "count": arr.len(),
-            "matched_count": arr.len(),
-            "updated_count": arr.len(),
+            "count": prepared.len(),
+            "matched_count": prepared.len(),
+            "updated_count": prepared.len(),
             "dry_run": true
         }))));
     }
 
     let mut items = Vec::<Value>::new();
     let strict = state.strict_mutation_operators;
-    for item in arr {
+    for (item, timestamps) in prepared {
         let mut patch = item
             .as_object()
             .cloned()
@@ -987,12 +1034,14 @@ async fn update_bulk_data_array(
             .and_then(|v| v.as_str().map(ToOwned::to_owned))
             .ok_or_else(|| AppError::BadRequest("all data items must include _id".to_string()))?;
 
-        if patch.is_empty() {
+        if patch.is_empty() && timestamps.is_empty() {
             continue;
         }
 
         let patch_value = Value::Object(patch);
-        if array_filters.is_some()
+        let updated = if patch_value.as_object().is_some_and(|patch| patch.is_empty()) {
+            None
+        } else if array_filters.is_some()
             || update_requires_mutation_engine(
             patch_value
                 .as_object()
@@ -1003,7 +1052,7 @@ async fn update_bulk_data_array(
                 .as_object()
                 .cloned()
                 .ok_or_else(|| AppError::BadRequest("data must be object".to_string()))?;
-            if let Some(v) = update_one_with_mutation(
+            update_one_with_mutation(
                 conn,
                 collection,
                 &id,
@@ -1013,9 +1062,6 @@ async fn update_bulk_data_array(
                 state.jsonb_enabled,
             )
             .await?
-            {
-                items.push(v);
-            }
         } else {
             let patch_str = patch_value.to_string();
             let mut binds = vec![
@@ -1038,6 +1084,7 @@ async fn update_bulk_data_array(
                 .await
                 .map_err(|e| AppError::Internal(format!("update_bulk data[] failed: {e}")))?;
 
+            let mut updated = None;
             while let Some(row) = rows
                 .next()
                 .await
@@ -1046,10 +1093,39 @@ async fn update_bulk_data_array(
                 let raw: String = row.get(0).map_err(|e| {
                     AppError::Internal(format!("update_bulk data[] row decode failed: {e}"))
                 })?;
-                items.push(serde_json::from_str::<Value>(&raw).map_err(|e| {
+                updated = Some(serde_json::from_str::<Value>(&raw).map_err(|e| {
                     AppError::Internal(format!("update_bulk data[] json decode failed: {e}"))
                 })?);
             }
+            updated
+        };
+        if !timestamps.is_empty() {
+            let mut binds = Vec::<libsql::Value>::new();
+            let where_clause = where_id_with_scope(&mut binds, collection, &id);
+            let mut rows = conn
+                .query(
+                    &format!("SELECT rowid FROM __kdb_documents WHERE {where_clause} LIMIT 1"),
+                    binds,
+                )
+                .await
+                .map_err(|e| AppError::Internal(format!("update timestamp target failed: {e}")))?;
+            if let Some(row) = rows.next().await.map_err(|e| {
+                AppError::Internal(format!("update timestamp target row failed: {e}"))
+            })? {
+                let rowid: i64 = row.get(0).map_err(|e| {
+                    AppError::Internal(format!("update timestamp rowid decode failed: {e}"))
+                })?;
+                drop(rows);
+                if let Some(v) =
+                    update_document_timestamps_by_rowid(conn, rowid, &timestamps).await?
+                {
+                    items.push(v);
+                    continue;
+                }
+            }
+        }
+        if let Some(v) = updated {
+            items.push(v);
         }
     }
 
@@ -1155,7 +1231,23 @@ fn replacement_doc_from_payload(doc: &mut Value, id: &str) -> AppResult<Value> {
     Ok(Value::Object(out))
 }
 
-fn reject_update_system_timestamps(value: Option<&Value>, field_name: &str) -> AppResult<()> {
+#[derive(Clone, Debug, Default)]
+struct UpdateSystemTimestamps {
+    created_at: Option<String>,
+    modified_at: Option<String>,
+}
+
+impl UpdateSystemTimestamps {
+    fn is_empty(&self) -> bool {
+        self.created_at.is_none() && self.modified_at.is_none()
+    }
+}
+
+fn validate_update_reserved_document_fields(
+    value: Option<&Value>,
+    field_name: &str,
+    allow_system_timestamps: bool,
+) -> AppResult<()> {
     let Some(value) = value else {
         return Ok(());
     };
@@ -1168,16 +1260,79 @@ fn reject_update_system_timestamps(value: Option<&Value>, field_name: &str) -> A
             continue;
         };
         if obj.keys().any(|key| {
-            matches!(key.as_str(), "_created_at" | "_modified_at")
-                || key.starts_with("_created_at.")
-                || key.starts_with("_modified_at.")
+            ["_user_id", "_metadata"]
+                .iter()
+                .any(|reserved| key == reserved || key.starts_with(&format!("{reserved}.")))
         }) {
             return Err(AppError::BadRequest(format!(
-                "{field_name} cannot contain _created_at or _modified_at; update preserves _created_at and manages _modified_at automatically"
+                "{field_name} cannot contain _user_id or _metadata; pass user_id or metadata as payload properties"
+            )));
+        }
+        if obj.keys().any(|key| {
+            key.starts_with("_created_at.")
+                || key.starts_with("_modified_at.")
+                || (!allow_system_timestamps
+                    && matches!(key.as_str(), "_created_at" | "_modified_at"))
+        }) {
+            return Err(AppError::BadRequest(format!(
+                "{field_name} cannot update _created_at or _modified_at unless allow_system_timestamps=true"
             )));
         }
     }
     Ok(())
+}
+
+fn prepare_update_document(
+    value: &mut Value,
+    field_name: &str,
+    allow_system_timestamps: bool,
+) -> AppResult<UpdateSystemTimestamps> {
+    validate_update_reserved_document_fields(
+        Some(value),
+        field_name,
+        allow_system_timestamps,
+    )?;
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::BadRequest(format!("{field_name} must be an object")))?;
+
+    let namespace_keys = obj
+        .keys()
+        .filter(|key| *key == "_namespace" || key.starts_with("_namespace."))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in namespace_keys {
+        obj.remove(&key);
+    }
+
+    let created_at = if allow_system_timestamps {
+        parse_optional_utc_rfc3339(obj.remove("_created_at").as_ref(), "_created_at")?
+    } else {
+        None
+    };
+    let modified_at = if allow_system_timestamps {
+        parse_optional_utc_rfc3339(obj.remove("_modified_at").as_ref(), "_modified_at")?
+    } else {
+        None
+    };
+
+    Ok(UpdateSystemTimestamps {
+        created_at,
+        modified_at,
+    })
+}
+
+fn normalize_document_update_user_id(user_id: Option<String>) -> AppResult<Option<String>> {
+    let Some(user_id) = user_id else {
+        return Ok(None);
+    };
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Err(AppError::BadRequest(
+            "user_id must be a non-empty string".to_string(),
+        ));
+    }
+    Ok(Some(user_id.to_string()))
 }
 
 fn delete_archive_ttl_secs(state: &AppState, payload_ttl: Option<i64>) -> AppResult<Option<i64>> {
@@ -3456,23 +3611,67 @@ mod transaction_tests {
     }
 
     #[test]
-    fn updates_reject_system_timestamp_fields() {
+    fn updates_reject_reserved_document_fields() {
+        for field in ["_user_id", "_user_id.value", "_metadata", "_metadata.source"] {
+            let mut value = json!({"_id": "doc-1"});
+            value.as_object_mut().expect("object").insert(
+                field.to_string(),
+                Value::String("2026-01-01T00:00:00Z".to_string()),
+            );
+            let error = validate_update_reserved_document_fields(Some(&value), "data", false)
+                .expect_err("reserved document field update must fail");
+            assert!(error.to_string().contains("cannot contain _user_id or _metadata"));
+            validate_update_reserved_document_fields(Some(&value), "data", true)
+                .expect_err("timestamp opt-in must not allow ownership or metadata fields");
+        }
         for field in ["_created_at", "_modified_at", "_created_at.value"] {
             let mut value = json!({"_id": "doc-1"});
             value.as_object_mut().expect("object").insert(
                 field.to_string(),
                 Value::String("2026-01-01T00:00:00Z".to_string()),
             );
-            let error = reject_update_system_timestamps(Some(&value), "data")
-                .expect_err("system timestamp update must fail");
-            assert!(error.to_string().contains("cannot contain _created_at or _modified_at"));
+            let error = validate_update_reserved_document_fields(Some(&value), "data", false)
+                .expect_err("system timestamp update must require opt-in");
+            assert!(error.to_string().contains("allow_system_timestamps=true"));
         }
 
-        reject_update_system_timestamps(
-            Some(&json!({"_id": "doc-1", "profile": {"_created_at": "custom"}})),
+        validate_update_reserved_document_fields(
+            Some(&json!({
+                "_id": "doc-1",
+                "profile": {
+                    "_created_at": "custom",
+                    "_user_id": "custom",
+                    "_metadata": {"source": "custom"}
+                }
+            })),
             "data",
+            false,
         )
-        .expect("nested user fields with the same name remain valid");
+        .expect("nested application fields with reserved leaf names remain valid");
+
+        let mut allowed = json!({
+            "_id": "doc-1",
+            "_namespace": "response-only",
+            "_created_at": "2026-01-01T05:00:00-05:00",
+            "_modified_at": "2026-01-02T10:00:00Z"
+        });
+        let timestamps = prepare_update_document(&mut allowed, "data", true)
+            .expect("opted-in system timestamps should be accepted");
+        assert_eq!(timestamps.created_at.as_deref(), Some("2026-01-01T10:00:00.000Z"));
+        assert_eq!(timestamps.modified_at.as_deref(), Some("2026-01-02T10:00:00.000Z"));
+        assert!(allowed.get("_namespace").is_none());
+        assert!(allowed.get("_created_at").is_none());
+        assert!(allowed.get("_modified_at").is_none());
+
+        let mut ordinary = json!({
+            "_id": "doc-1",
+            "_namespace": "response-only",
+            "name": "Ada"
+        });
+        prepare_update_document(&mut ordinary, "data", false)
+            .expect("response namespace should be discarded without timestamp opt-in");
+        assert!(ordinary.get("_namespace").is_none());
+        assert_eq!(ordinary.get("name"), Some(&json!("Ada")));
     }
 
     #[test]
